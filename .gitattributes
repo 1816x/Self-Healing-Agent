@@ -1,0 +1,7 @@
+# Keep generated/vendored files out of the GitHub language bar.
+package-lock.json linguist-vendored
+pnpm-lock.yaml linguist-vendored
+yarn.lock linguist-vendored
+go.sum linguist-vendored
+uv.lock linguist-vendored
+node_modules/* linguist-vendored

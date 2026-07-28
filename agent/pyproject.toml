@@ -1,0 +1,14 @@
+[project]
+name = "self-healing-agent"
+version = "0.0.0"
+description = "Claude function-calling agent: diagnoses incidents and proposes fixes."
+requires-python = ">=3.11"
+dependencies = []
+
+# Phase 3 adds the Claude tool loop and its dependencies (anthropic SDK,
+# sqlite access, unified-diff validation). Left empty in Phase 0 on purpose —
+# no dependency should land before the code that needs it.
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
