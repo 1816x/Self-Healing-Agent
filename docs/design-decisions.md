@@ -89,6 +89,57 @@ isn't lost, and as a reminder to let genuine test failures land as their
 own commit once Phase 2's iteration starts, instead of quietly fixing
 forward.
 
-## Phase 1 onward
+## Phase 1 — decisions made during the vertical slice
+
+### SQLite driver: `modernc.org/sqlite` over `mattn/go-sqlite3`
+The mattn driver is the ecosystem default but needs cgo, which drags a C
+toolchain into CI and cross-compilation. The modernc port is pure Go —
+`go test ./...` works anywhere Go does. The trade-off (slower than cgo
+sqlite under heavy write load) is irrelevant at a few incident rows per
+demo run. Side effect worth recording: its module requirements bumped
+`go.mod` to Go 1.25.
+
+### CI Go version: `go-version-file` instead of a hardcoded string
+The Phase 0 workflow pinned `go-version: "1.24"`. It drifted the moment
+the sqlite driver bumped go.mod — the first hardcoded-copy-of-truth in
+the repo to break, one phase after it was written. Corrected to
+`go-version-file: monitor/go.mod` so there's a single source of truth.
+Classic small lesson, kept here because it's the kind of thing
+interviewers ask about CI hygiene.
+
+### The B1 bug: validation that passes, lookup that explodes
+The injected patch precomputes `PRICE_CENTS_BY_ID` keyed by `str(id)`
+("copied from a JSON-keyed cache" is the implied backstory) while the
+membership check uses a set of int ids. So validation approves the
+request and the price lookup raises `KeyError` — an unhandled 500, not a
+clean 404. That distinction is the point: a bug that fails validation
+would produce polite 4xx responses and never page anyone; this one
+produces exactly the error-spike signature the detector exists for. The
+innocent commit message ("perf(checkout): precompute price lookup
+table") is deliberate — real regressions don't announce themselves.
+
+### Detector clocks off event timestamps, not wall time
+`ErrorRate.Observe` prunes its window using the incoming event's
+timestamp. Tests construct synthetic timelines and get fully
+deterministic behavior — no sleeps, no clock mocking. The daemon's
+behavior is identical since events arrive in near-real-time anyway.
+
+### Empty `main` had to become "main = root commit"
+Santiago picked "create an empty main" for the Phase 0 PR base. GitHub
+refuses PRs between branches with no common ancestor, so a truly empty
+orphan main can't receive one. Adjusted to main starting at the root
+commit (the workmap doc, zero code) — closest workable version of the
+intent, and all Phase 0 code still went through a reviewable PR (#1).
+
+### Observed in the live run (feeding Phase 2)
+- A sustained failure re-fires an incident every N errors — the
+  post-fire reset is dedup theater, not real debounce. Phase 2's
+  cooldown/dedup work is scoped for exactly this.
+- The `request.unhandled_exception` log line carries no `status` field
+  (the middleware logs before re-raising), so evidence samples show
+  `status=0`. Detection is unaffected (`level=error` matches); cosmetic
+  fix can ride along in Phase 2.
+
+## Phase 2 onward
 
 To be filled in as each phase closes.

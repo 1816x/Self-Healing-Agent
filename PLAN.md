@@ -75,20 +75,21 @@ docs/        design-decisions.md, architecture.md
 
 ## Phases
 
-### F0 — Scaffolding (3-5 commits)
-- [ ] Repo layout, `.gitattributes` with linguist-vendored for lockfiles
-- [ ] demo-app skeleton: 2 endpoints, structured JSON logs, `/metrics`
-- [ ] CI: build + test jobs for Go, Python, TypeScript
-- [ ] README skeleton: pitch, architecture diagram, injected-bugs disclaimer
-- [ ] `docs/design-decisions.md` created with the six decisions above
+### F0 — Scaffolding (3-5 commits) — ✅ closed 2026-07-28, PR #1
+- [x] Repo layout, `.gitattributes` with linguist-vendored for lockfiles
+- [x] demo-app skeleton: 3 endpoints, structured JSON logs, `/metrics`
+- [x] CI: build + test jobs for Go and Python (TypeScript job moved to F5 — see design-decisions)
+- [x] README skeleton: pitch, architecture diagram, injected-bugs disclaimer
+- [x] `docs/design-decisions.md` created with the six decisions above
 
 **Done when:** demo app runs and emits logs/metrics; CI is green on an empty test suite.
 
-### F1 — Vertical slice, no AI (2-4 commits)
-- [ ] Monitor tails demo-app logs, sliding-window error-rate detector
-- [ ] `inject_bug.sh b1` → incident row appears in SQLite with alert logged
+### F1 — Vertical slice, no AI (2-4 commits) — ✅ closed 2026-07-28
+- [x] Monitor tails demo-app logs, sliding-window error-rate detector
+- [x] `inject_bug.sh b1` → incident row appears in SQLite with alert logged
 
 **Done when:** injecting B1 produces an incident end-to-end with zero AI involved.
+*Verified live: baseline load produced 0 incidents; injecting B1 mid-run produced `error_rate` incident rows with route counts and log samples in evidence. Known F1 limitation feeding F2: a sustained failure re-fires an incident every N errors — that's the dedup/debounce work already scoped there.*
 
 ### F2 — Detection iteration (8-15 commits, the long block)
 - [ ] Metrics scraper + p95 latency detector (B2)
