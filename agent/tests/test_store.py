@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 
 import pytest
 from conftest import insert_incident
@@ -25,7 +26,7 @@ def test_rejects_a_database_older_than_required(tmp_path):
     the agent never silently operates on a database missing its columns.
     """
     path = tmp_path / "old.db"
-    with sqlite3.connect(path) as db:
+    with closing(sqlite3.connect(path)) as db, db:
         db.execute("CREATE TABLE incidents (id INTEGER PRIMARY KEY)")
         db.execute("PRAGMA user_version = 2")
 
@@ -55,7 +56,7 @@ def test_corrupt_evidence_does_not_make_an_incident_unreadable(real_schema_db):
     shouldn't take an incident permanently out of the pipeline.
     """
     incident_id = insert_incident(real_schema_db)
-    with sqlite3.connect(real_schema_db) as db:
+    with closing(sqlite3.connect(real_schema_db)) as db, db:
         db.execute("UPDATE incidents SET evidence = ? WHERE id = ?", ("not json{", incident_id))
 
     with Store(str(real_schema_db)) as s:
@@ -128,7 +129,7 @@ def test_claim_next_takes_the_oldest_first(real_schema_db):
 
 
 def _read_row(db_path, incident_id: int) -> sqlite3.Row:
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         db.row_factory = sqlite3.Row
         return db.execute("SELECT * FROM incidents WHERE id = ?", (incident_id,)).fetchone()
 

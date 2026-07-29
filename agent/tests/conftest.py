@@ -13,6 +13,7 @@ import json
 import shutil
 import sqlite3
 import subprocess
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -73,15 +74,20 @@ def real_schema_db(monitor_binary: Path, tmp_path: Path) -> Path:
 
 
 def _wait_for_schema(db_path: Path, attempts: int = 200) -> None:
-    """Polls until the monitor has created and migrated the database."""
+    """Polls until the monitor has created and migrated the database.
+
+    Every connection is closed explicitly. ``with sqlite3.connect(...)``
+    commits the transaction but does *not* close the connection — leaking
+    one handle per poll onto a database the monitor is concurrently writing
+    was enough to cause lock contention and make this wedge.
+    """
     import time
 
     for _ in range(attempts):
         if db_path.exists():
             try:
-                with sqlite3.connect(db_path) as db:
-                    version = db.execute("PRAGMA user_version").fetchone()[0]
-                    if version >= 3:
+                with closing(sqlite3.connect(db_path)) as db:
+                    if db.execute("PRAGMA user_version").fetchone()[0] >= 3:
                         return
             except sqlite3.DatabaseError:
                 pass  # mid-write; try again
@@ -104,7 +110,7 @@ def insert_incident(
         "routes": {"/checkout": 5},
         "samples": ["2026-07-29T12:00:00Z error request.completed /checkout status=500"],
     }
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db, db:
         cursor = db.execute(
             """INSERT INTO incidents
                  (created_at, kind, dedup_key, status, window_start, window_end,
