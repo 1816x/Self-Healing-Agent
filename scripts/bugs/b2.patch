@@ -1,0 +1,28 @@
+diff --git a/demo-app/app/main.py b/demo-app/app/main.py
+index fdcaec4..22db144 100644
+--- a/demo-app/app/main.py
++++ b/demo-app/app/main.py
+@@ -75,9 +75,22 @@ def health() -> dict:
+     return {"status": "ok"}
+ 
+ 
++SIMULATED_PRICE_LOOKUP_SECONDS = 0.04
++
++
++def _lookup_live_price(product_id: int) -> int:
++    """Simulates a per-item round trip to a live pricing service.
++
++    No real pricing service exists in this demo — the sleep stands in
++    for the network latency such a call would add.
++    """
++    time.sleep(SIMULATED_PRICE_LOOKUP_SECONDS)
++    return next(p["price_cents"] for p in PRODUCTS if p["id"] == product_id)
++
++
+ @app.get("/products")
+ def list_products() -> list[dict]:
+-    return PRODUCTS
++    return [{**p, "price_cents": _lookup_live_price(p["id"])} for p in PRODUCTS]
+ 
+ 
+ @app.post("/checkout")
