@@ -251,6 +251,215 @@ p95 threshold comfortably; B3's ~2 cache items/sec (one per checkout at
 4×. Verified against the real numbers the live gate run produced, not
 assumed.
 
-## Phase 3 onward
+## Phase 3 — the diagnosis agent
+
+### The thing I got wrong before writing a line: the API had moved
+
+I was about to write `thinking: {"type": "enabled", "budget_tokens": N}`.
+That form is **removed** on the current Opus family and returns a 400. I
+also would have put `effort` at the top level of the request (it belongs
+inside `output_config`) and might well have passed a `temperature` (all
+sampling parameters are now rejected outright).
+
+None of that came from carelessness — it came from a model's training
+data being a snapshot. The cutoff was January 2026; this was built at the
+end of July. Six months is enough for three breaking changes in one
+request shape.
+
+So the first action of this phase was reading the current API reference,
+not writing code. **The transferable lesson, and the reason this is the
+first entry rather than a footnote: for a fast-moving dependency, "I know
+this API" is a claim with a shelf life.** Verify the request shape against
+current docs at the start of the work, not when a 400 arrives in
+production. Everything in `client.py` that looks like trivia — the
+`adaptive` thinking form, `output_config.effort`, `display: "summarized"`
+— is there because it was checked.
+
+### Manual loop instead of the SDK's tool runner
+
+The Anthropic SDK ships a `tool_runner` helper that drives the
+call → execute → feed-back cycle, and **its own guidance is to default to
+it**. This project doesn't, which means the burden is on me to justify it
+rather than to assume a hand-written loop looks more impressive.
+
+Two reasons specific to this repo:
+
+1. **Offline replay wants exactly one seam.** The demo has to run without
+   an API key, which means substituting the model turn. `loop.run()` takes
+   a `completer` callable and knows nothing else about where turns come
+   from — live, recorded, or scripted in a test all satisfy the same
+   protocol. Bending the tool runner's per-turn hooks into that shape
+   would have been more code, not less.
+2. **The repo's stated purpose is being explainable.** A loop you read top
+   to bottom is worth more here than one you configure.
+
+**When this would be the wrong call:** a production agent with no replay
+requirement. Then the tool runner is better — it is maintained, it
+handles `pause_turn` resumption and compaction, and hand-rolling that is
+a liability. Recording the alternative honestly matters more than
+defending the choice.
+
+### One protocol, so offline mode can't rot
+
+`Completer` is a `Protocol`, and the replay types (`replay.Block`,
+`replay.Response`) use the same attribute names as the SDK's response
+objects. So the live path passes SDK objects through untouched — no
+adapter layer — and offline mode exercises *the same code path*, not a
+parallel one guarded by an `if offline:` branch that only runs in the
+demo and quietly rots. The loop genuinely cannot tell which it's talking
+to; the tests rely on that, and use the replay types rather than bespoke
+fakes for the same reason.
+
+### Go owns all DDL; Python asserts the version
+
+The v2→v3 migration (diagnosis columns) landed in the Go monitor even
+though only the Python agent writes those columns. The monitor already
+has the `PRAGMA user_version` ladder, and the alternative — both
+languages carrying migration statements for one table — is the
+arrangement that rots the first time someone edits only one side.
+
+`Store.__init__` asserts `user_version >= 3` and, on failure, names the
+monitor as the thing to run. The store tests build the real monitor
+binary and let it create the database, so the cross-language schema
+contract is a tested property rather than a comment; CI installs Go in
+the agent job for that reason, since without it those tests would skip
+and a drift would ship green.
+
+### Path confinement is the actual security work
+
+The tool surface is the agent's entire security boundary: whatever those
+five functions permit is exactly what a confused or prompt-injected model
+can reach. And the threat isn't hypothetical here — the agent reads the
+demo app's own log lines by design, which is a channel an instruction
+could arrive through.
+
+Blocklisting `..` would have felt like the fix and covered one of five
+escape techniques. `resolve_within()` resolves first and *then* checks
+containment, which is what catches the other four: a symlink whose path
+contains no traversal at all, a symlinked parent directory, an absolute
+path, and (trivially) encoded traversal. Each has its own test, because
+they fail differently.
+
+Absolute paths are **refused rather than silently rebased**. Quietly
+reinterpreting `/etc/passwd` as repo-relative would hide that the model
+has the wrong mental model of the tool.
+
+### Five tools, and why not a bash tool
+
+Each maps to a question an on-call engineer actually asks, in the order
+they ask it: what broke (`read_logs`), how badly (`get_metrics`), what
+changed (`git_log_recent`), who touched this line (`git_blame`), what does
+the code say (`read_source`).
+
+A single `bash` tool would cover all five and more, with less code. It was
+rejected because it would be **unauditable**: one opaque command string
+instead of five typed calls that can each be individually bounded, logged,
+and refused. The call trace stored on the incident — which the Phase 5
+dashboard renders — only means something because the calls are typed.
+
+### `propose_fix` is terminal, gated, and records nothing to disk
+
+The one tool that produces an artifact neither writes a file nor opens a
+pull request. It ends the loop and stores `{root_cause, suspect_commit,
+diff, rationale}` on the incident. Phase 4 adds the gate that actually
+matters (does the diff apply? do the demo app's tests pass?) before any
+PR exists. It's also the only tool declared `strict` with
+`additionalProperties: false`, since its output is parsed and stored.
+
+Guardrail rejections and unknown tools come back as `is_error`
+tool_results rather than exceptions, so a model that asks for a bad path
+gets told and gets another turn. A test asserts the loop survives a
+refused path and still reaches a conclusion — the recovery behavior is
+the point, not the rejection.
+
+### Refusal is a first-class outcome, not an error
+
+Opus 5 ships elevated cybersecurity safeguards, and this project is
+security-adjacent by construction: it analyzes failures, reads source,
+and proposes patches. A refusal arrives as **HTTP 200** with
+`stop_reason: "refusal"` and empty or partial content — so `content[0]`
+on a refused response is exactly how this would break in production
+rather than in a test. The loop checks `stop_reason` before touching
+content, and the incident gets its own `diagnosis_refused` status:
+nothing is broken and retrying the same prompt won't help, so filing it
+as a failure would hide *why* a diagnosis is missing.
+
+**Deliberately deferred:** the server-side `fallbacks` beta, which
+re-runs a refused request on another model. This project already has a
+fallback path (offline heuristics), and putting a beta endpoint in the
+demo's default path costs more than it buys here. Worth revisiting if
+refusals show up in practice.
+
+### Prompt caching, because the loop re-sends the same prefix every turn
+
+The system prompt and tool definitions are byte-identical on every
+iteration and render ahead of the messages, so top-level
+`cache_control: {"type": "ephemeral"}` makes turns 2..N read that prefix
+instead of reprocessing it. `LiveCompleter` accumulates
+`cache_read_input_tokens` and the CLI prints it, so this is a claim the
+first live run will either confirm or refute rather than one I get to
+assert.
+
+### Offline mode has three tiers, and the labeling is the design
+
+1. **Recorded replay** — turns a real model produced (`--record`).
+   Stored as `source: "replay"`.
+2. **Hand-authored replay** — turns a human wrote to demonstrate the
+   loop. Stored as `source: "replay-scripted"`, warned about on the CLI,
+   `origin: hand_authored` in the file.
+3. **Heuristic** — rule-based triage when no transcript matches. Says
+   `NOT A MODEL DIAGNOSIS` in the root-cause field, carries
+   `confidence: low`, and returns `suspect_commit: None` rather than
+   inventing one when git history is unreadable.
+
+An absent `origin` field defaults to `hand_authored` — the conservative
+direction, so a transcript can only claim to be a real recording by
+explicitly saying so.
+
+This tiering exists because the honest failure mode of a keyless demo is
+"admits it is guessing," and the dishonest one is "produces
+agent-shaped output indistinguishable from a real run." A portfolio
+project that fabricates model output and calls it a diagnosis is worse
+than one with a smaller demo. Tier 2 exists at all only because the
+labeling makes it safe: it drives the real loop over real tools, and
+nothing downstream can present it as a model run.
+
+### What Phase 3 did not verify, stated plainly
+
+**No live API call has ever been made through `LiveCompleter`.** The
+environment this was built in has no credentials — no key, no token, no
+`ant` profile. The request shape was written against current docs and
+every loop invariant around it is unit-tested with scripted turns, but
+tests passing is not the API accepting the request. The F3 gate says
+"online and offline"; only offline is met. That's why PLAN.md marks F3
+code-complete rather than closed.
+
+### Two bugs the tests caught, and one process mistake I made
+
+**Bug 1 — leaked SQLite connections under concurrency.** The store tests
+started failing intermittently, but only the first one, and only in the
+full suite. Cause: `with sqlite3.connect(...)` commits the transaction
+but does **not** close the connection. The schema-wait poll leaked one
+handle per iteration onto a database the monitor was concurrently
+writing, and the lock contention wedged it. Fixed with
+`contextlib.closing`; verified across three consecutive full-suite runs
+rather than declared fixed after one pass.
+
+**Bug 2 — dead code in `git_blame`.** A leftover `"--line-porcelain" if
+False else "-s"` from an edit. Harmless, and exactly the kind of thing
+that survives into a portfolio repo and gets asked about in an
+interview.
+
+**Process mistake — `git reset --hard` ate uncommitted work.** While
+cleaning up an injected bug commit, I ran `git reset --hard HEAD~1` with
+uncommitted provenance changes to two tracked files in the working tree.
+The reset destroyed them (the new transcript files survived only because
+untracked files are left alone). I had to redo all three edits. The habit
+that would have prevented it: commit or stash *before* any `reset --hard`,
+and never chain it after a compound command that also did real work.
+Recorded because the interesting failures in a project like this are
+rarely the algorithms.
+
+## Phase 4 onward
 
 To be filled in as each phase closes.

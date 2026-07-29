@@ -22,7 +22,7 @@ import (
 // hand-built DB from any earlier version up to this one — the honest
 // answer to "how does a file-based store evolve its schema without a
 // migration framework" for a project this size.
-const schemaVersion = 2
+const schemaVersion = 3
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS incidents (
@@ -48,10 +48,37 @@ var schemaV2Statements = []string{
 	`UPDATE incidents SET updated_at = window_end WHERE updated_at = ''`,
 }
 
-// StatusDetected is the only status this phase produces; Phase 3 adds the
-// transitions ('diagnosing', 'diagnosed', ...) that make the rest of the
-// lifecycle real.
-const StatusDetected = "detected"
+// v3 adds the columns the Phase 3 diagnosis agent writes back. The Go
+// monitor never writes them — it only ever inserts and merges incidents —
+// but the DDL lives here anyway: this package already owns the migration
+// ladder, and one language owning all schema beats two languages agreeing
+// on it. The Python agent asserts user_version >= 3 instead of carrying a
+// duplicate copy of these statements (see docs/design-decisions.md).
+var schemaV3Statements = []string{
+	`ALTER TABLE incidents ADD COLUMN diagnosis TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE incidents ADD COLUMN diagnosed_at TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE incidents ADD COLUMN proposed_fix TEXT NOT NULL DEFAULT ''`,
+}
+
+// Incident lifecycle. The monitor only ever produces StatusDetected; every
+// later transition is written by the Phase 3 agent (and Phase 4's PR step).
+// They're declared here so both sides share one vocabulary rather than
+// trading bare strings.
+const (
+	StatusDetected = "detected"
+	// StatusDiagnosing is claimed atomically, so two agent processes can't
+	// pick up the same incident.
+	StatusDiagnosing = "diagnosing"
+	StatusDiagnosed  = "diagnosed"
+	// StatusFixProposed means a diff was recorded. Phase 4 adds the
+	// validation gate and the PR; Phase 3 only records.
+	StatusFixProposed = "fix_proposed"
+	// StatusDiagnosisFailed covers a tool-loop error or a blown iteration
+	// cap; StatusDiagnosisRefused covers stop_reason == "refusal" from the
+	// model, which is a distinct outcome worth not conflating with a bug.
+	StatusDiagnosisFailed  = "diagnosis_failed"
+	StatusDiagnosisRefused = "diagnosis_refused"
+)
 
 type Store struct {
 	db *sql.DB
@@ -108,6 +135,14 @@ func migrate(db *sql.DB) error {
 			}
 		}
 		version = 2
+	}
+	if version < 3 {
+		for _, stmt := range schemaV3Statements {
+			if _, err := db.Exec(stmt); err != nil {
+				return fmt.Errorf("apply v3 migration (%s): %w", stmt, err)
+			}
+		}
+		version = 3
 	}
 
 	// PRAGMA doesn't support bound parameters; version is our own int,

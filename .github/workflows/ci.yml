@@ -46,5 +46,31 @@ jobs:
         working-directory: demo-app
         run: pytest -q
 
+  agent:
+    name: agent (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # The agent's store tests build the monitor and let it create a real
+      # database, so the cross-language schema contract is actually tested.
+      # That needs the Go toolchain in this job too — without it those tests
+      # skip, and a schema drift would ship green.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: monitor/go.mod
+          cache-dependency-path: monitor/go.sum
+      - name: install
+        working-directory: agent
+        run: pip install -e ".[dev]"
+      - name: lint
+        working-directory: agent
+        run: ruff check diagnose tests
+      - name: test
+        working-directory: agent
+        run: pytest -q
+
   # TypeScript job (dashboard) added in Phase 5, once the Next.js app exists —
   # see PLAN.md and docs/design-decisions.md for why it isn't here yet.
