@@ -185,6 +185,83 @@ func TestOpenMigratesAV1DatabaseAndPreservesData(t *testing.T) {
 	}
 }
 
+func TestOpenMigratesAV2DatabaseAndPreservesData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "incidents.db")
+
+	// Hand-build a real F2-era database: v1 schema plus the v2 columns, with
+	// user_version actually set to 2 — the state a DB left by the Phase 2
+	// monitor is in. This is the new migration hop; the v1 test above now
+	// exercises v1 -> v3 transitively, but it can't catch a v2 -> v3 bug
+	// because a fresh v1 DB has no v2 columns to collide with.
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(schemaV1); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range schemaV2Statements {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO incidents (created_at, kind, dedup_key, window_start, window_end, evidence, updated_at, occurrences)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"2026-07-29T12:00:00Z", "latency_p95", "latency_p95:/products",
+		"2026-07-29T12:00:00Z", "2026-07-29T12:00:02Z",
+		`{"summary":"p95 243ms on GET /products","metrics":{"p95_ms":243}}`,
+		"2026-07-29T12:00:02Z", 2,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open must migrate a v2 database, got: %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version = %d, want %d", version, schemaVersion)
+	}
+
+	// The new v3 columns exist and default to empty for a pre-existing row.
+	var diagnosis, diagnosedAt, proposedFix string
+	err = s.db.QueryRow(
+		`SELECT diagnosis, diagnosed_at, proposed_fix FROM incidents WHERE id = 1`,
+	).Scan(&diagnosis, &diagnosedAt, &proposedFix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diagnosis != "" || diagnosedAt != "" || proposedFix != "" {
+		t.Errorf("expected empty v3 columns on a migrated row, got %q/%q/%q",
+			diagnosis, diagnosedAt, proposedFix)
+	}
+
+	// The pre-existing v2 data must survive untouched.
+	var dedupKey string
+	var occurrences int
+	if err := s.db.QueryRow(
+		`SELECT dedup_key, occurrences FROM incidents WHERE id = 1`,
+	).Scan(&dedupKey, &occurrences); err != nil {
+		t.Fatal(err)
+	}
+	if dedupKey != "latency_p95:/products" || occurrences != 2 {
+		t.Errorf("v2 data lost across migration: dedup_key=%q occurrences=%d", dedupKey, occurrences)
+	}
+}
+
 func TestMigrateIsIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "incidents.db")
 	s1, err := Open(path)
