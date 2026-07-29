@@ -23,6 +23,8 @@ func main() {
 	window := flag.Duration("window", time.Minute, "sliding window for the error-rate detector")
 	threshold := flag.Int("threshold", 5, "errors within the window that fire an incident")
 	poll := flag.Duration("poll", 250*time.Millisecond, "log poll interval")
+	dedupWindow := flag.Duration("dedup-window", 2*time.Minute,
+		"how long an ongoing condition merges into the same incident row instead of opening a new one")
 	flag.Parse()
 
 	incidents, err := store.Open(*dbPath)
@@ -57,13 +59,17 @@ func main() {
 		if incident == nil {
 			continue
 		}
-		id, err := incidents.InsertIncident(incident)
+		id, merged, err := incidents.UpsertIncident(incident, *dedupWindow)
 		if err != nil {
-			log.Printf("ALERT dropped, insert failed: %v", err)
+			log.Printf("ALERT dropped, upsert failed: %v", err)
 			continue
 		}
-		log.Printf("ALERT incident #%d: %s — %s [%s .. %s]",
-			id, incident.Kind, incident.Summary,
+		verb := "new"
+		if merged {
+			verb = "ongoing"
+		}
+		log.Printf("ALERT incident #%d (%s): %s — %s [%s .. %s]",
+			id, verb, incident.Kind, incident.Summary,
 			incident.WindowStart.Format(time.RFC3339),
 			incident.WindowEnd.Format(time.RFC3339))
 	}
