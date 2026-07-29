@@ -1,0 +1,45 @@
+diff --git a/demo-app/app/main.py b/demo-app/app/main.py
+index fdcaec4..7dd3dfd 100644
+--- a/demo-app/app/main.py
++++ b/demo-app/app/main.py
+@@ -9,13 +9,14 @@ agent have something genuine to detect, diagnose, and fix.
+ from __future__ import annotations
+ 
+ import time
++import uuid
+ 
+ from fastapi import FastAPI, HTTPException, Request
+ from fastapi.responses import Response
+ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+ 
+ from app.logging import get_logger, log_event
+-from app.metrics import ERRORS_TOTAL, REQUEST_LATENCY, REQUESTS_TOTAL
++from app.metrics import CACHE_ITEMS, ERRORS_TOTAL, REQUEST_LATENCY, REQUESTS_TOTAL
+ 
+ app = FastAPI(title="demo-app", version="0.0.0")
+ logger = get_logger()
+@@ -80,6 +81,12 @@ def list_products() -> list[dict]:
+     return PRODUCTS
+ 
+ 
++# Idempotency cache for checkout retries: keyed by a fresh id per request
++# so a client that resends a checkout after a dropped response can be
++# replayed instead of double-charged.
++CHECKOUT_CACHE: dict[str, dict] = {}
++
++
+ @app.post("/checkout")
+ def checkout(payload: dict) -> dict:
+     """Charges for the requested product IDs.
+@@ -100,7 +107,10 @@ def checkout(payload: dict) -> dict:
+             raise HTTPException(status_code=404, detail=f"unknown product_id {pid}")
+         total_cents += match["price_cents"]
+ 
+-    return {"total_cents": total_cents, "item_count": len(product_ids)}
++    result = {"total_cents": total_cents, "item_count": len(product_ids)}
++    CHECKOUT_CACHE[str(uuid.uuid4())] = result
++    CACHE_ITEMS.set(len(CHECKOUT_CACHE))
++    return result
+ 
+ 
+ @app.get("/metrics")
