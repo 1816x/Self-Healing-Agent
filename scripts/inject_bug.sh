@@ -18,9 +18,14 @@ case "$BUG" in
     PATCH="scripts/bugs/b1.patch"
     MESSAGE="perf(checkout): precompute price lookup table"
     ;;
+  b2)
+    PATCH="scripts/bugs/b2.patch"
+    MESSAGE="feat(products): enrich listing with live price lookups"
+    ;;
   *)
     echo "usage: $0 <bug-id>" >&2
     echo "  b1   checkout regression: price lookup raises KeyError -> 500s on every checkout" >&2
+    echo "  b2   products latency regression: per-item simulated round trip -> high p95 on GET /products" >&2
     exit 1
     ;;
 esac
