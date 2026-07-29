@@ -58,22 +58,41 @@ class TranscriptExhaustedError(RuntimeError):
     """
 
 
-class ReplayCompleter:
-    """Yields recorded turns in order."""
+#: A transcript produced by an actual model run (LiveCompleter --record).
+ORIGIN_RECORDED = "recorded"
+#: A transcript written by hand to demonstrate the loop without an API key.
+#: Not model output. Tracked separately so it can never be presented as one.
+ORIGIN_HAND_AUTHORED = "hand_authored"
 
-    def __init__(self, turns: list[dict[str, Any]]):
+
+class ReplayCompleter:
+    """Yields transcript turns in order.
+
+    Carries its ``origin`` so a hand-authored demo transcript can never be
+    reported as a real model run. The CLI warns on replay and the stored
+    diagnosis gets ``source: "replay-scripted"`` instead of ``"replay"``.
+    """
+
+    def __init__(self, turns: list[dict[str, Any]], origin: str = ORIGIN_RECORDED):
         self._turns = turns
         self._index = 0
+        self.origin = origin
+
+    @property
+    def is_recorded(self) -> bool:
+        return self.origin == ORIGIN_RECORDED
 
     @classmethod
     def for_kind(cls, kind: str, directory: Path | None = None) -> ReplayCompleter | None:
-        """Loads the transcript recorded for an incident kind, if one exists."""
+        """Loads the transcript for an incident kind, if one exists."""
         directory = directory or TRANSCRIPT_DIR
         path = directory / f"{kind}.json"
         if not path.exists():
             return None
         payload = json.loads(path.read_text(encoding="utf-8"))
-        return cls(payload["turns"])
+        # Absent origin means hand-authored: the conservative default, so a
+        # transcript can only claim to be a real recording by saying so.
+        return cls(payload["turns"], payload.get("origin", ORIGIN_HAND_AUTHORED))
 
     def __call__(self, messages: list[dict[str, Any]]) -> Response:
         if self._index >= len(self._turns):
@@ -101,12 +120,22 @@ def _block(raw: dict[str, Any]) -> Block:
     )
 
 
-def save_transcript(kind: str, turns: list[dict[str, Any]], directory: Path | None = None) -> Path:
-    """Writes a recorded session so offline mode can replay it."""
+def save_transcript(
+    kind: str,
+    turns: list[dict[str, Any]],
+    directory: Path | None = None,
+    origin: str = ORIGIN_RECORDED,
+) -> Path:
+    """Writes a session so offline mode can replay it.
+
+    Called from ``--record`` after a live run, so the default origin is
+    ``recorded``: only an actual model session gets written this way.
+    """
     directory = directory or TRANSCRIPT_DIR
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{kind}.json"
     path.write_text(
-        json.dumps({"kind": kind, "turns": turns}, indent=2) + "\n", encoding="utf-8"
+        json.dumps({"kind": kind, "origin": origin, "turns": turns}, indent=2) + "\n",
+        encoding="utf-8",
     )
     return path

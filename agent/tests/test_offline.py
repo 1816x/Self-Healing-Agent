@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 
 import anthropic
 import httpx
@@ -156,3 +157,57 @@ def test_unknown_exception_is_labeled_rather_than_swallowed():
     message = describe_api_error(RuntimeError("something odd"))
     assert "unexpected error" in message
     assert "something odd" in message
+
+
+# --- transcript provenance labeling ---
+
+
+def test_recorded_transcript_is_marked_recorded(tmp_path):
+    save_transcript("k", [], directory=tmp_path)
+    completer = ReplayCompleter.for_kind("k", directory=tmp_path)
+    assert completer is not None
+    assert completer.is_recorded
+
+
+def test_transcript_without_an_origin_defaults_to_hand_authored(tmp_path):
+    """A transcript can only claim to be a real recording by saying so.
+
+    Defaulting an unlabeled file to 'recorded' would let a hand-written one
+    silently pass as model output — the exact misrepresentation the origin
+    field exists to prevent.
+    """
+    (tmp_path / "k.json").write_text(json.dumps({"kind": "k", "turns": []}))
+    completer = ReplayCompleter.for_kind("k", directory=tmp_path)
+    assert completer is not None
+    assert not completer.is_recorded
+    assert completer.origin == "hand_authored"
+
+
+def test_shipped_transcript_is_labeled_and_self_describing():
+    """The transcript this repo ships must not read as model output."""
+    completer = ReplayCompleter.for_kind("error_rate")
+    assert completer is not None, "the demo transcript should exist"
+    assert not completer.is_recorded, "shipped demo turns are hand-written, not recorded"
+
+    payload = json.loads(
+        (
+            Path(__file__).resolve().parents[1] / "diagnose" / "transcripts" / "error_rate.json"
+        ).read_text()
+    )
+    assert payload["origin"] == "hand_authored"
+    assert "NOT MODEL OUTPUT" in payload["_comment"]
+
+
+def test_shipped_transcript_ends_by_proposing_a_fix():
+    """It has to exercise the terminal-tool path to be worth shipping."""
+    completer = ReplayCompleter.for_kind("error_rate")
+    turns = [completer([]) for _ in range(5)]
+
+    assert any(
+        block.type == "tool_use" and block.name == "propose_fix"
+        for block in turns[-1].content
+    )
+    # And it reaches that conclusion via logs plus blame, which is the
+    # capability Phase 3's gate is written around.
+    used = [block.name for turn in turns for block in turn.content if block.type == "tool_use"]
+    assert "read_logs" in used and "git_blame" in used

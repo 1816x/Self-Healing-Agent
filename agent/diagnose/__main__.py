@@ -113,14 +113,26 @@ def _run_offline(store: Store, incident: Incident, toolbox: Toolbox, args) -> in
         _print_summary(diagnosis, status="diagnosed (heuristic)")
         return 0
 
-    print("replaying recorded session (offline)")
+    if completer.is_recorded:
+        print("replaying a recorded model session (offline)")
+        source = "replay"
+    else:
+        # Loud on purpose. A hand-authored transcript exercises the real
+        # loop and real tools, but the turns are not model output and must
+        # never read as though they were.
+        print(
+            "replaying a HAND-AUTHORED transcript (offline) — these turns are "
+            "scripted, not model output. Run live with --record for a real one."
+        )
+        source = "replay-scripted"
+
     try:
         outcome = loop.run(completer, toolbox, incident_briefing(incident), args.max_turns)
     except replay.TranscriptExhaustedError as exc:
         store.mark_failed(incident.id, str(exc))
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    return _record_outcome(store, incident, outcome, source="replay")
+    return _record_outcome(store, incident, outcome, source=source)
 
 
 def _run_live(store: Store, incident: Incident, toolbox: Toolbox, args) -> int:
