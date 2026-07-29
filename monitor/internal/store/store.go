@@ -35,9 +35,10 @@ type Store struct {
 // evidence is the JSON blob stored per incident: everything the Phase 3
 // agent needs to start a diagnosis without re-reading the whole log.
 type evidence struct {
-	ErrorCount int            `json:"error_count"`
-	Routes     map[string]int `json:"routes"`
-	Samples    []string       `json:"samples"`
+	Summary string             `json:"summary"`
+	Metrics map[string]float64 `json:"metrics"`
+	Routes  map[string]int     `json:"routes,omitempty"`
+	Samples []string           `json:"samples"`
 }
 
 func Open(path string) (*Store, error) {
@@ -60,9 +61,10 @@ func (s *Store) Close() error {
 // returns its row id.
 func (s *Store) InsertIncident(incident *detect.Incident) (int64, error) {
 	blob, err := json.Marshal(evidence{
-		ErrorCount: incident.ErrorCount,
-		Routes:     incident.Routes,
-		Samples:    incident.Samples,
+		Summary: incident.Summary,
+		Metrics: incident.Metrics,
+		Routes:  incident.Routes,
+		Samples: incident.Samples,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("marshal evidence: %w", err)

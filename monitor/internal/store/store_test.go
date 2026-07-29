@@ -13,9 +13,11 @@ func testIncident() *detect.Incident {
 	start := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	return &detect.Incident{
 		Kind:        "error_rate",
+		DedupKey:    "error_rate",
 		WindowStart: start,
 		WindowEnd:   start.Add(3 * time.Second),
-		ErrorCount:  5,
+		Summary:     "5 errors across 1 route(s)",
+		Metrics:     map[string]float64{"error_count": 5},
 		Routes:      map[string]int{"/checkout": 5},
 		Samples:     []string{"2026-07-28T12:00:00Z error request.completed /checkout status=500"},
 	}
@@ -52,7 +54,7 @@ func TestInsertAndReadBack(t *testing.T) {
 	if err := json.Unmarshal([]byte(blob), &ev); err != nil {
 		t.Fatalf("evidence is not valid JSON: %v", err)
 	}
-	if ev.ErrorCount != 5 || ev.Routes["/checkout"] != 5 || len(ev.Samples) != 1 {
+	if ev.Metrics["error_count"] != 5 || ev.Routes["/checkout"] != 5 || len(ev.Samples) != 1 {
 		t.Errorf("evidence round-trip mismatch: %+v", ev)
 	}
 }

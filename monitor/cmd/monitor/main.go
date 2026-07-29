@@ -62,10 +62,9 @@ func main() {
 			log.Printf("ALERT dropped, insert failed: %v", err)
 			continue
 		}
-		log.Printf("ALERT incident #%d: %s — %d errors in [%s .. %s], routes=%v",
-			id, incident.Kind, incident.ErrorCount,
+		log.Printf("ALERT incident #%d: %s — %s [%s .. %s]",
+			id, incident.Kind, incident.Summary,
 			incident.WindowStart.Format(time.RFC3339),
-			incident.WindowEnd.Format(time.RFC3339),
-			incident.Routes)
+			incident.WindowEnd.Format(time.RFC3339))
 	}
 }
