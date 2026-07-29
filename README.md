@@ -58,11 +58,19 @@ no message broker, no services to babysit.
 
 ## Status
 
-Phases 0-2 done — the demo app, the monitor daemon, and all three detectors
+Phases 0-2 done: the demo app, the monitor daemon, and all three detectors
 (error-rate, p95 latency, memory growth) work end to end against real
-injected bugs. Phase 3 (Claude diagnosis agent) is next. See `PLAN.md` for
-the phase plan and `docs/design-decisions.md` for why the architecture looks
-the way it does.
+injected bugs.
+
+Phase 3 (the diagnosis agent) is code-complete with one honest caveat: the
+offline path is verified end to end, but **no live API call has been made
+yet**, because the environment it was built in had no credentials. The
+request shape was written against current API docs and every loop
+invariant is unit-tested, but that isn't the same as the API accepting it —
+so the first live run is the remaining Phase 3 work. Details in `PLAN.md`.
+
+See `docs/design-decisions.md` for why the architecture looks the way it
+does, including what got rejected.
 
 ## Quickstart
 
@@ -83,6 +91,24 @@ Within seconds the corresponding detector fires and an incident lands in
 ```bash
 sqlite3 incidents.db 'SELECT id, kind, status, occurrences, evidence FROM incidents;'
 ```
+
+Then diagnose it. No API key needed:
+
+```bash
+cd agent && pip install -e ".[dev]" && cd ..
+python -m diagnose --db incidents.db --offline --repo-root .
+```
+
+The agent claims the incident, drives its read-only tools (`read_logs` →
+`git_log_recent` → `git_blame` → `read_source`) against this repository,
+and records a root cause plus a proposed diff on the incident. Drop
+`--offline` to call the API for real.
+
+Offline mode tells you what it is: with no recorded model session it either
+replays a hand-authored transcript (labeled `source: "replay-scripted"`) or
+falls back to rule-based triage that says `NOT A MODEL DIAGNOSIS`. It never
+presents scripted turns as model output — see
+`agent/diagnose/transcripts/README.md`.
 
 Undo an injection before trying another: `git reset --hard HEAD~1` (the
 injected commit is local-only — `inject_bug.sh` never pushes it).

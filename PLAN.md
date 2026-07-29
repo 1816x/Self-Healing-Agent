@@ -101,13 +101,19 @@ docs/        design-decisions.md, architecture.md
 **Done when:** two detectors (three with B3) pass fixture tests; a flapping signal produces one incident, not fifty.
 *Verified live: baseline load produced 0 incidents. B2 injected mid-run → `latency_p95` incident at p95≈243ms (threshold 100ms), then a second firing merged into the same row (`occurrences` 1→2, logged "(ongoing)") instead of opening a new one. B3 injected (separate run) → `memory_growth` incident, cache growing 0→13 items at ≈0.67/s (threshold 0.5/s). B1 re-verified against the new `UpsertIncident` path — still fires correctly. All three bug commits reset after checking, never pushed.*
 
-### F3 — Diagnosis agent (3-6 commits)
-- [ ] Python agent picks up new incidents, runs Claude function-calling loop
-- [ ] The five tools implemented with guardrails; diagnosis written back to incident
-- [ ] Offline mode: recorded transcripts + heuristic fallback
-- [ ] `docs:` commit explaining tool design and what got rejected
+### F3 — Diagnosis agent (6 commits) — ⚠️ code complete 2026-07-29, gate **partially** verified
+- [x] Python agent picks up new incidents (atomic claim), runs Claude function-calling loop
+- [x] The five tools implemented with guardrails; diagnosis written back to incident
+- [x] Offline mode: transcript replay + heuristic fallback, with provenance labeling
+- [x] `docs:` commit explaining tool design and what got rejected
 
 **Done when:** on B1, the agent names the guilty commit and the root cause using at least logs + git blame, online and offline.
+
+*Status: the offline half of that gate is met; the online half is **not yet verified**.*
+
+- **Offline — verified.** Live run against a real B1 incident: the loop drove `read_logs` → `git_log_recent` → `git_blame` → `read_source` → `propose_fix` against the real repository, reached `fix_proposed`, and stored the root cause and diff. The heuristic fallback was verified separately on the same incident and correctly declined to invent a commit when git history was unreadable.
+- **Live — implemented, unverified.** The environment this was built in has no API credentials (no key, no token, no `ant` profile), so no real model call has ever been made through `LiveCompleter`. Its request shape was written against current API docs rather than recalled, and every loop invariant around it is unit-tested with scripted turns — but "the tests pass" is not "the API accepted it." **The first live run is the remaining F3 work**, and until it happens F3 is not closed.
+- **Consequence for the demo:** no recorded transcript exists yet, so the shipped one is hand-authored and labeled `origin: hand_authored` everywhere it surfaces (`source: "replay-scripted"` in the store, a warning on the CLI). `--record` on the first live run replaces it with a real one.
 
 ### F4 — Auto-fix + PR (3-6 commits)
 - [ ] `propose_fix` produces a diff; validation gate: applies cleanly + demo-app tests pass
