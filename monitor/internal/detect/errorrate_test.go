@@ -44,8 +44,11 @@ func TestFiresAtThresholdWithEvidence(t *testing.T) {
 	if incident.Kind != "error_rate" {
 		t.Errorf("kind = %q", incident.Kind)
 	}
-	if incident.ErrorCount != 3 {
-		t.Errorf("error count = %d, want 3", incident.ErrorCount)
+	if incident.DedupKey != "error_rate" {
+		t.Errorf("dedup key = %q", incident.DedupKey)
+	}
+	if incident.Metrics["error_count"] != 3 {
+		t.Errorf("error count = %v, want 3", incident.Metrics["error_count"])
 	}
 	if incident.Routes["/checkout"] != 3 {
 		t.Errorf("route counts = %v", incident.Routes)

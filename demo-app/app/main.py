@@ -49,6 +49,7 @@ async def instrument_requests(request: Request, call_next):
         log_event(
             logger, "error", "request.unhandled_exception",
             route=route, method=method, duration_ms=round(duration_ms, 2),
+            status=500,  # FastAPI's default response for an unhandled exception
         )
         raise
 

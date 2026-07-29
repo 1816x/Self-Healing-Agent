@@ -18,9 +18,19 @@ case "$BUG" in
     PATCH="scripts/bugs/b1.patch"
     MESSAGE="perf(checkout): precompute price lookup table"
     ;;
+  b2)
+    PATCH="scripts/bugs/b2.patch"
+    MESSAGE="feat(products): enrich listing with live price lookups"
+    ;;
+  b3)
+    PATCH="scripts/bugs/b3.patch"
+    MESSAGE="feat(checkout): cache results for idempotent retries"
+    ;;
   *)
     echo "usage: $0 <bug-id>" >&2
     echo "  b1   checkout regression: price lookup raises KeyError -> 500s on every checkout" >&2
+    echo "  b2   products latency regression: per-item simulated round trip -> high p95 on GET /products" >&2
+    echo "  b3   checkout memory leak: idempotency cache never evicted -> unbounded cache growth" >&2
     exit 1
     ;;
 esac

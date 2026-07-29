@@ -91,14 +91,15 @@ docs/        design-decisions.md, architecture.md
 **Done when:** injecting B1 produces an incident end-to-end with zero AI involved.
 *Verified live: baseline load produced 0 incidents; injecting B1 mid-run produced `error_rate` incident rows with route counts and log samples in evidence. Known F1 limitation feeding F2: a sustained failure re-fires an incident every N errors — that's the dedup/debounce work already scoped there.*
 
-### F2 — Detection iteration (8-15 commits, the long block)
-- [ ] Metrics scraper + p95 latency detector (B2)
-- [ ] Memory-slope detector (B3, stretch)
-- [ ] Detector tests on synthetic log/metric fixtures — `test:` then `fix:` commits as fixtures expose real bugs
-- [ ] False-positive handling: debounce, cooldown, incident dedup
-- [ ] Incident lifecycle states in SQLite
+### F2 — Detection iteration (9 commits) — ✅ closed 2026-07-29
+- [x] Metrics scraper + p95 latency detector (B2)
+- [x] Memory-slope detector (B3, stretch — shipped, not skipped)
+- [x] Detector tests on synthetic log/metric fixtures — `test:` then `fix:` in the store dedup commit, same as F1's reload bug
+- [x] False-positive handling: debounce, cooldown, incident dedup
+- [x] Incident lifecycle states in SQLite (`user_version`-migrated schema; `StatusDetected` today, Phase 3 adds the rest)
 
 **Done when:** two detectors (three with B3) pass fixture tests; a flapping signal produces one incident, not fifty.
+*Verified live: baseline load produced 0 incidents. B2 injected mid-run → `latency_p95` incident at p95≈243ms (threshold 100ms), then a second firing merged into the same row (`occurrences` 1→2, logged "(ongoing)") instead of opening a new one. B3 injected (separate run) → `memory_growth` incident, cache growing 0→13 items at ≈0.67/s (threshold 0.5/s). B1 re-verified against the new `UpsertIncident` path — still fires correctly. All three bug commits reset after checking, never pushed.*
 
 ### F3 — Diagnosis agent (3-6 commits)
 - [ ] Python agent picks up new incidents, runs Claude function-calling loop

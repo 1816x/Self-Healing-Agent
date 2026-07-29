@@ -140,6 +140,117 @@ intent, and all Phase 0 code still went through a reviewable PR (#1).
   `status=0`. Detection is unaffected (`level=error` matches); cosmetic
   fix can ride along in Phase 2.
 
-## Phase 2 onward
+## Phase 2 — detection iteration
+
+### Own Prometheus text-format parser, not `prometheus/common/expfmt`
+We control both ends — our own `/metrics` output from Phase 0 — and only
+need two metrics (the latency histogram, the cache gauge) out of the
+dozen-plus families `prometheus_client` emits (Python GC stats, process
+memory, our own counters already covered by the log-based error-rate
+detector). Pulling in the official protobuf-based client for that is
+heavy; a ~100-line scoped parser, tested against a real captured scrape
+including the noise lines to prove filtering rather than assume it, is
+lighter and is itself a legitimate parsing-skill talking point — the
+same shape of choice as VTA's own tree-sitter parser.
+
+### Histograms are cumulative — detection needs deltas
+`demo_app_request_latency_seconds` never resets while the process runs,
+so p95 has to come from the *difference* between two consecutive
+scrapes' bucket counts, not raw counts. A bucket whose count decreased
+between scrapes means the app restarted (Prometheus counters reset to
+zero) — that invalidates the interval instead of producing a nonsensical
+negative delta, the same "shrink means something structural happened"
+pattern as the Phase 1 log tailer's rotation handling.
+
+### Dedup/cooldown lives in the store, not the detector — and needed a real refactor
+Each detector still decides *when* a condition is worth firing (its own
+window/threshold/breach-count, unchanged in spirit from Phase 1).
+`UpsertIncident` merges a fresh firing into the still-open incident with
+the same `DedupKey` if it landed within a dedup window of the last
+update, instead of inserting a new row. Getting there required
+generalizing `detect.Incident` first (`refactor(monitor): generalize
+Incident shape`, its own commit) — F1's struct was built entirely around
+`ErrorCount`, and Phase 2 needed a shape three different detector kinds
+could share. A flat `Metrics map[string]float64` replaced the bespoke
+field; `DedupKey` was added separately from `Kind` because `Kind` alone
+isn't specific enough once a detector fires per-route (two different
+routes breaching latency at once must not collapse into one incident).
+
+Merging **replaces** evidence with the incoming (latest) snapshot rather
+than numerically combining old and new `Metrics` — summing makes sense
+for `error_count`, not for `p95_ms` (which should reflect the latest
+reading, not a running total), and the store has no way to know which
+rule applies to which metric. "Latest state plus an occurrence count" is
+how most real incident/alerting tools show an ongoing condition anyway,
+so this is a reasonable simplification, not a missing feature.
+
+### Found by its own test: `updated_at` mixed wall-clock and event time
+The dedup decision compares an incoming incident's `WindowStart`
+(event-time, deterministic) against the existing row's `updated_at`. The
+first implementation wrote `updated_at` from `time.Now()` — wall clock —
+which only happened to "work" in earlier manual testing because the
+fake event-time in test fixtures was close to the real clock. A test
+that set the incident's event-time days apart from the real system
+clock caught it immediately: the merge decision came out wrong in both
+directions depending on which way the fake and real clocks diverged.
+Fixed by writing `updated_at` from the incident's own `WindowEnd`
+instead, consistent with the "detectors run on event-time" rule already
+used everywhere else (Phase 1's ErrorRate, this phase's Latency). This
+is the same category of bug as F1's `importlib.reload` test failure —
+found and fixed before the commit landed, not preserved as a `test:`/
+`fix:` pair, but real and worth recording for the same reason.
+
+### Schema evolves via `PRAGMA user_version`
+F1 shipped a schema with no `dedup_key`/`updated_at`/`occurrences`.
+Rather than assume every `incidents.db` on disk is fresh, `Store.Open`
+reads `user_version` and applies whatever migrations are missing, in
+order — tested by hand-building a real v1-shaped database (the exact
+`CREATE TABLE` and 5-column `INSERT` F1 used) and confirming both the
+migration and the pre-existing row survive it. Small, but it's the
+honest answer to "how does a file-based store evolve without a
+migration framework," and it's the kind of thing that comes up in a
+systems-design interview question.
+
+### Latency and memory detectors are scrape-driven, not event-driven — and that's fine
+`ErrorRate` accumulates discrete log events within a `time.Duration`
+window. `Latency` and `MemorySlope` have no discrete "event" — only
+periodic snapshots — so their debounce is a count of consecutive
+over-threshold *scrapes* (`MinBreaches`) or a least-squares slope over a
+lookback window of gauge readings, not an event-count-within-a-window.
+Forcing both shapes to look identical would have meant inventing fake
+events; the asymmetry is a consequence of the signal, not an
+inconsistency, and is exactly what a debounce mechanism should look
+like for a continuously-sampled metric.
+
+### Least squares, not (last − first) ÷ duration, for the memory-slope
+A naive two-point comparison is fooled by noise at either endpoint — one
+low reading at the start or one high reading at the end can suggest
+growth (or hide it) that isn't really there. `TestMemorySlopeNoisyButFlatDoesNotFire`
+constructs oscillating data where the raw endpoints (50 → 52) would read
+as growth to a two-point check but the actual least-squares trend across
+all six points is slightly negative — proving the regression isn't fooled
+by exactly that failure mode, not just asserting it in a comment.
+
+### B2 and B3 are realistic regressions, not sleep-for-effect hacks
+B2: `/products` starts calling a per-item "live pricing" lookup
+(`time.sleep` standing in for a downstream round trip) instead of
+returning the static catalog — the textbook N+1 shape (one query became
+N) without a real database to N+1 against. B3: `/checkout` starts
+caching every result under a fresh UUID "for idempotent retries" and
+nothing ever evicts it — a genuinely common leak shape (cache added, TTL
+forgotten), not a contrived one. Both ship via the same
+write-the-real-change → diff → revert → `scripts/bugs/bN.patch` flow as
+B1, with the same innocent-sounding commit messages once injected.
+
+### Live-run margins, chosen deliberately
+Detector thresholds are sized with real headroom against the demo's
+actual traffic, not hand-tuned after the fact: B2's ~120ms per
+`/products` call (3 items × 40ms simulated round trip) clears a 100ms
+p95 threshold comfortably; B3's ~2 cache items/sec (one per checkout at
+`run_demo.sh`'s 0.5s loop cadence) clears a 0.5/sec growth threshold by
+4×. Verified against the real numbers the live gate run produced, not
+assumed.
+
+## Phase 3 onward
 
 To be filled in as each phase closes.

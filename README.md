@@ -58,17 +58,31 @@ no message broker, no services to babysit.
 
 ## Status
 
-Phase 0 (scaffolding) in progress — see `PLAN.md` for the phase plan and
-`docs/design-decisions.md` for why the architecture looks the way it does.
+Phases 0-2 done — the demo app, the monitor daemon, and all three detectors
+(error-rate, p95 latency, memory growth) work end to end against real
+injected bugs. Phase 3 (Claude diagnosis agent) is next. See `PLAN.md` for
+the phase plan and `docs/design-decisions.md` for why the architecture looks
+the way it does.
 
 ## Quickstart
 
-Full instructions land in Phase 5 once the whole loop exists end to end. For
-now, the demo app runs on its own:
+```bash
+scripts/run_demo.sh          # terminal 1: demo app + monitor + steady load
+scripts/inject_bug.sh b1     # terminal 2: pick one — b1, b2, or b3
+```
+
+Within seconds the corresponding detector fires and an incident lands in
+`incidents.db`:
+
+| Bug | Regression | Detector |
+|-----|-----------|----------|
+| `b1` | `/checkout` 500s on every request | `error_rate` (log-based) |
+| `b2` | `/products` goes slow (simulated N+1) | `latency_p95` (metric-based) |
+| `b3` | in-memory cache grows unbounded | `memory_growth` (metric-based) |
 
 ```bash
-cd demo-app
-pip install -e ".[dev]"
-pytest -q
-uvicorn app.main:app --reload
+sqlite3 incidents.db 'SELECT id, kind, status, occurrences, evidence FROM incidents;'
 ```
+
+Undo an injection before trying another: `git reset --hard HEAD~1` (the
+injected commit is local-only — `inject_bug.sh` never pushes it).
