@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from diagnose import store
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MONITOR_DIR = REPO_ROOT / "monitor"
 
@@ -87,7 +89,8 @@ def _wait_for_schema(db_path: Path, attempts: int = 200) -> None:
         if db_path.exists():
             try:
                 with closing(sqlite3.connect(db_path)) as db:
-                    if db.execute("PRAGMA user_version").fetchone()[0] >= 3:
+                    version = db.execute("PRAGMA user_version").fetchone()[0]
+                    if version >= store.REQUIRED_SCHEMA_VERSION:
                         return
             except sqlite3.DatabaseError:
                 pass  # mid-write; try again

@@ -22,7 +22,7 @@ import (
 // hand-built DB from any earlier version up to this one — the honest
 // answer to "how does a file-based store evolve its schema without a
 // migration framework" for a project this size.
-const schemaVersion = 3
+const schemaVersion = 4
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS incidents (
@@ -60,6 +60,17 @@ var schemaV3Statements = []string{
 	`ALTER TABLE incidents ADD COLUMN proposed_fix TEXT NOT NULL DEFAULT ''`,
 }
 
+// v4 adds what Phase 4 needs to record the outcome of the validation gate
+// and the pull request it opens. validation holds the gate's evidence (did
+// the diff apply, were the tests red before and green after) and is kept
+// separate from diagnosis: one is what the model claimed, the other is
+// what this machine independently checked, and collapsing them would make
+// a proposal indistinguishable from a verified fix.
+var schemaV4Statements = []string{
+	`ALTER TABLE incidents ADD COLUMN validation TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE incidents ADD COLUMN pr_url TEXT NOT NULL DEFAULT ''`,
+}
+
 // Incident lifecycle. The monitor only ever produces StatusDetected; every
 // later transition is written by the Phase 3 agent (and Phase 4's PR step).
 // They're declared here so both sides share one vocabulary rather than
@@ -78,6 +89,15 @@ const (
 	// model, which is a distinct outcome worth not conflating with a bug.
 	StatusDiagnosisFailed  = "diagnosis_failed"
 	StatusDiagnosisRefused = "diagnosis_refused"
+	// StatusFixValidated means the proposed diff applied cleanly and the
+	// demo app's tests passed with it. It is deliberately distinct from
+	// StatusPROpened: validation is local and always runs, opening a PR is
+	// a separate, opt-in, outward-facing act.
+	StatusFixValidated = "fix_validated"
+	// StatusFixFailed means the gate rejected the diff — it didn't apply,
+	// or the tests didn't pass with it. Terminal: no PR is opened.
+	StatusFixFailed = "fix_failed"
+	StatusPROpened  = "pr_opened"
 )
 
 type Store struct {
@@ -104,8 +124,23 @@ type evidence struct {
 // sample cap (see detect.maxSamples), which bounds a single Incident.
 const maxStoredSamples = 10
 
+// busyTimeout is how long SQLite waits for a lock held by another
+// *process* before giving up. The mutex above only serializes this
+// process's own goroutines; it says nothing about the diagnosis agent or
+// the dashboard, which open the same file whenever they like. Without
+// this, a reader holding a shared lock for a few milliseconds is enough
+// to make the monitor's migration fail with SQLITE_BUSY and kill it at
+// startup — which is exactly what the agent's test suite reproduced once
+// the v4 migration widened the window.
+const busyTimeout = 5 * time.Second
+
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// Encoded as a DSN pragma rather than a `PRAGMA busy_timeout` after
+	// connecting: database/sql pools connections and hands out new ones on
+	// demand, so a pragma run once on one connection would not apply to
+	// the others. The DSN applies to every connection the pool opens.
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(%d)", path, busyTimeout.Milliseconds())
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
@@ -143,6 +178,14 @@ func migrate(db *sql.DB) error {
 			}
 		}
 		version = 3
+	}
+	if version < 4 {
+		for _, stmt := range schemaV4Statements {
+			if _, err := db.Exec(stmt); err != nil {
+				return fmt.Errorf("apply v4 migration (%s): %w", stmt, err)
+			}
+		}
+		version = 4
 	}
 
 	// PRAGMA doesn't support bound parameters; version is our own int,

@@ -460,6 +460,153 @@ and never chain it after a compound command that also did real work.
 Recorded because the interesting failures in a project like this are
 rarely the algorithms.
 
-## Phase 4 onward
+## Phase 4 — Auto-fix and the pull request
+
+### The bug had to be published, or the MVP gate was unreachable
+
+The spec's third criterion is "at least one real PR with a proposed,
+functional fix." Phase 4 started by discovering that the repo as built
+could not satisfy it. The injected bug commit was strictly local and
+`inject_bug.sh` never pushed, so a fix PR against `main` would revert
+code `main` has never contained — it could not apply, and CI could not
+judge it. The choice was between a PR that documents a fix and a PR that
+*is* one.
+
+`inject_bug.sh --push` publishes the bug to `demo/<bug>-<sha>` and the fix
+PR targets that branch. The PR is then genuinely mergeable, CI-verifiable,
+and reviewable, while `main` still never carries an injected bug — the
+script refuses to publish from `main` at all, and refuses before it
+commits anything, so a refusal leaves the tree untouched.
+
+This narrows a stated policy rather than quietly contradicting it: "never
+push the injected commit" became "never push it to `main`". Both README
+and PLAN.md say the new thing.
+
+### Validate in a worktree, and validate against the *right* tree
+
+The gate applies the model's diff to a throwaway `git worktree` and runs
+the demo app's suite there. Two things this buys: the operator's checkout
+is never touched (design-decisions already records a session where a
+`git reset --hard` ate uncommitted work — a validator that mutates the
+tree would be that mistake institutionalised), and the tested tree is a
+complete, real checkout rather than a simulation.
+
+The first version cut that worktree from `HEAD`. That was wrong in a way
+only the finished artifact revealed: the PR targets a base branch, so
+validating against `HEAD` tests one tree while proposing a change to
+another, and every commit made in between rides along into the PR. The
+first real pull request this pipeline produced carried an unrelated
+refactor beside the one-line fix. Now both are the base ref, preferring
+`origin/<base>` because that is what GitHub actually diffs against.
+
+The lesson is narrow and worth keeping: the unit tests were green for
+this bug the whole time, because they asserted the gate's verdict rather
+than the shape of the thing it produced.
+
+### Red before, green after — and admitting when you only have half of it
+
+After-green alone proves the diff didn't break anything; it cannot tell a
+real fix from a no-op. Red-before plus green-after can. So the suite runs
+twice.
+
+But red-before is recorded, not required. B2 and B3 are latency and memory
+regressions that no unit test turns red, and requiring the pair would make
+them permanently unfixable. When the suite was already green the gate
+still passes and records `proves_a_fix: false` — and the PR body says
+plainly that the tests do not witness the regression and reviewer
+judgement carries more weight. A body that read identically in both cases
+would be overstating what was checked.
+
+### A failed pull request is not a failed fix
+
+The first end-to-end run recorded `fix_failed` on a GitHub 403 —
+overwriting a validation record that said "applied cleanly, tests red
+before and green after". A network error had erased the one thing the run
+had actually established.
+
+Validation failure and PR failure are now separate paths. A PR that can't
+be opened leaves the incident `fix_validated` with the error attached,
+because that is what happened. `validation` is also its own column rather
+than more keys inside `diagnosis`: one is what the model claimed, the
+other is what this machine checked, and a dashboard has to be able to tell
+a proposal from a verified fix.
+
+### The PR opener's guardrails are about blast radius, not correctness
+
+Everything upstream of it is confined to a checkout nobody else sees; this
+is the one step the outside world observes. So: the destination repository
+is pinned in code rather than derived from whatever `origin` says, because
+the agent reads content it did not write — log lines, commit subjects,
+source comments — and the step that writes somewhere public is exactly
+what a prompt injection would aim at. Host and repository are checked
+independently, so a remote borrowing the local proxy's path layout
+(`https://evil.com/git/1816x/...`) is still refused. There is no merge
+call in the module and a test asserts its absence.
+
+Loopback hosts are accepted alongside `github.com`, which is a real
+concession: this repo is developed in sandboxes whose git goes through a
+local proxy, and the first version of the check simply refused to run
+here. The slug allowlist is what carries the guarantee; the host check
+narrows it.
+
+### What Phase 4 did not verify, stated plainly
+
+**The PR opener's own HTTP request has never been accepted by GitHub.**
+This sandbox's `GITHUB_TOKEN` is proxied and returns 403 on direct API
+calls, so the agent pushed the branch and built the request, but the final
+`POST /pulls` for PR #6 came from the session's GitHub tooling instead.
+This is the same shape of gap as Phase 3's unproven `LiveCompleter`, and
+it is recorded the same way rather than glossed. The failure path *is*
+verified — the agent classified the 403, kept its validation evidence, and
+exited non-zero.
+
+### Four defects this phase surfaced, none in the new code's happy path
+
+**1 — The monitor died at startup under a concurrent reader.** It opened
+SQLite with no busy timeout, so any other process holding a read lock for
+a few milliseconds made the migration's `PRAGMA user_version` fail with
+`SQLITE_BUSY`, which `Open()` treats as fatal. The existing mutex never
+covered this; it serializes one process's goroutines, and the whole
+architecture is one file shared by three languages. It presented as a
+flaky test fixture failing about one run in three after the v4 migration
+widened the window — and "flaky fixture" is exactly the diagnosis that
+would have shipped it. The monitor's own stderr had the answer, in a pipe
+nothing was reading.
+
+**2 — The Phase 3 transcript proposed a diff that could never apply.** A
+bare `@@` hunk header with no line ranges. It looked fine in the store and
+in CLI output for an entire phase, because no code path had ever tried to
+apply it. Fixed at the source — the `propose_fix` contract and the prompt
+now specify the format — plus a test that applies every shipped
+transcript's diff against a B1-injected checkout.
+
+**3 — The validation gate used the wrong base ref.** Covered above.
+
+**4 — `ruff>=0.7` let CI and this machine enforce different rules.** CI
+installed 0.16.1, which promoted `ISC004` out of preview; local had
+0.15.8, where the rule requires `--preview`. The build went red on code
+that had been green in every local run. Both packages now pin
+`>=0.16,<0.17`. An unbounded linter is a build that fails on someone
+else's schedule.
+
+### The `propose_fix` description had to stop being true, so it was rewritten
+
+It told the model "the diff is NOT applied and no pull request is opened
+by this call". Accurate in Phase 3; false the moment the gate existed.
+Leaving it would have been the cheap option and a lie to the one reader
+who cannot check. It now says the call itself changes nothing, the diff is
+then applied to a throwaway checkout and tested, and a PR may follow —
+and that nothing is ever merged automatically.
+
+### Known gap
+
+An incident that crashes between `fix_proposed` and the gate cannot be
+re-driven: `claim()` only takes incidents in `detected`. This is inherited
+from Phase 3, where `fix_proposed` was terminal, and it is not a
+regression — but with a Phase 4 pipeline behind it, a resume path is worth
+having. Left for Phase 5, where the dashboard will want to trigger reruns
+anyway.
+
+## Phase 5 onward
 
 To be filled in as each phase closes.

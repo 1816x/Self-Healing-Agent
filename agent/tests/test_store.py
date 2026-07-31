@@ -20,20 +20,23 @@ def test_opens_a_real_monitor_database(real_schema_db):
 
 
 def test_rejects_a_database_older_than_required(tmp_path):
-    """A pre-v3 database fails loudly, naming the fix.
+    """A database one version behind fails loudly, naming the fix.
 
     This is the guard that keeps the cross-language schema contract honest:
     the agent never silently operates on a database missing its columns.
+    Both versions come from the constant rather than being written out, so
+    the next schema bump doesn't have to remember to edit this test.
     """
+    stale = store_mod.REQUIRED_SCHEMA_VERSION - 1
     path = tmp_path / "old.db"
     with closing(sqlite3.connect(path)) as db, db:
         db.execute("CREATE TABLE incidents (id INTEGER PRIMARY KEY)")
-        db.execute("PRAGMA user_version = 2")
+        db.execute(f"PRAGMA user_version = {stale}")
 
     with pytest.raises(SchemaTooOldError) as excinfo:
         Store(str(path))
     message = str(excinfo.value)
-    assert "v2" in message and "v3" in message
+    assert f"v{stale}" in message and f"v{store_mod.REQUIRED_SCHEMA_VERSION}" in message
     assert "monitor" in message.lower(), "error should point at who owns migrations"
 
 
@@ -189,3 +192,60 @@ def test_mark_failed_and_mark_refused_are_distinct_outcomes(real_schema_db):
     )
     assert json.loads(failed["diagnosis"])["error"] == "iteration cap reached"
     assert json.loads(refused["diagnosis"])["refusal"]["category"] == "cyber"
+
+
+def test_validation_outcome_is_recorded_separately_from_diagnosis(real_schema_db):
+    """A verified fix must be distinguishable from a mere proposal.
+
+    The model's claim lands in `diagnosis`; what the gate independently
+    checked lands in `validation`. If these shared a column a dashboard
+    could not tell "the model says this works" from "this was run and it
+    works" — which is the whole point of having a gate.
+    """
+    incident_id = insert_incident(real_schema_db)
+    with Store(str(real_schema_db)) as s:
+        s.claim(incident_id)
+        s.write_proposed_fix(
+            incident_id,
+            {"source": "replay", "root_cause": "int/str key mismatch"},
+            {"diff": "--- a/x\n+++ b/x\n", "rationale": "key by int"},
+        )
+        s.write_validated(
+            incident_id,
+            {"applied": True, "tests_before": "failed", "tests_after": "passed"},
+        )
+
+    row = _read_row(real_schema_db, incident_id)
+    assert row["status"] == store_mod.STATUS_FIX_VALIDATED
+    assert json.loads(row["validation"])["tests_after"] == "passed"
+    # The Phase 3 diagnosis is still intact underneath it.
+    assert json.loads(row["diagnosis"])["root_cause"] == "int/str key mismatch"
+
+
+def test_validation_failure_is_terminal_and_keeps_the_reason(real_schema_db):
+    incident_id = insert_incident(real_schema_db)
+    with Store(str(real_schema_db)) as s:
+        s.claim(incident_id)
+        s.write_validation_failed(
+            incident_id,
+            {"applied": False, "error": "error: patch failed: demo-app/app/main.py:29"},
+        )
+
+    row = _read_row(real_schema_db, incident_id)
+    assert row["status"] == store_mod.STATUS_FIX_FAILED
+    assert row["pr_url"] == "", "a failed validation must never carry a PR"
+    assert "patch failed" in json.loads(row["validation"])["error"], (
+        "git's own message is kept so the failure is diagnosable without a rerun"
+    )
+
+
+def test_write_pr_opened_records_the_url(real_schema_db):
+    incident_id = insert_incident(real_schema_db)
+    url = "https://github.com/1816x/Self-Healing-Agent/pull/7"
+    with Store(str(real_schema_db)) as s:
+        s.claim(incident_id)
+        s.write_pr_opened(incident_id, url)
+
+    row = _read_row(real_schema_db, incident_id)
+    assert row["status"] == store_mod.STATUS_PR_OPENED
+    assert row["pr_url"] == url

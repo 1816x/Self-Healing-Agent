@@ -3,8 +3,10 @@
 Five read-only investigation tools plus one gated write. That split is
 the design decision worth defending: the agent can look at anything in
 the repository and nothing else, and the single tool that produces an
-artifact (``propose_fix``) neither writes to disk nor opens a pull
-request — it records a proposal for a human-gated Phase 4 step.
+artifact (``propose_fix``) still writes nothing itself — it records a
+proposal. Everything downstream of it (apply to a throwaway worktree, run
+the tests, open a pull request) happens outside the model's control, in
+code the model cannot call, and stops short of merging.
 
 Why these five and not more: each maps to a question a human on-call
 engineer actually asks, in the order they ask it. What broke (logs),
@@ -152,8 +154,10 @@ def tool_definitions() -> list[dict[str, Any]]:
             "description": (
                 "Record your final diagnosis and a proposed fix, then stop. Call this "
                 "exactly once, when you can name the root cause and the commit that "
-                "introduced it. The diff is NOT applied and no pull request is opened "
-                "by this call — a human reviews it first."
+                "introduced it. This call does not change the repository: afterwards "
+                "the diff is applied to a throwaway checkout and the tests are run, and "
+                "only if that passes may a pull request be opened — for a human to "
+                "review and merge. Nothing is ever merged automatically."
             ),
             "strict": True,
             "input_schema": {
@@ -169,7 +173,14 @@ def tool_definitions() -> list[dict[str, Any]]:
                     },
                     "diff": {
                         "type": "string",
-                        "description": "A unified diff that fixes the root cause.",
+                        "description": (
+                            "A unified diff that fixes the root cause, applied with "
+                            "`git apply`. Requires '--- a/<path>' and '+++ b/<path>' "
+                            "header lines with repository-relative paths, and a full "
+                            "hunk header with line ranges such as '@@ -12,7 +12,7 @@' — "
+                            "a bare '@@' is rejected. Include three lines of exact "
+                            "context around each change."
+                        ),
                     },
                     "rationale": {
                         "type": "string",

@@ -16,8 +16,8 @@ from datetime import UTC, datetime
 from typing import Self
 
 # Must match monitor/internal/store/store.go's schemaVersion. The agent
-# reads and writes columns v3 introduced, so anything older can't serve it.
-REQUIRED_SCHEMA_VERSION = 3
+# reads and writes columns v4 introduced, so anything older can't serve it.
+REQUIRED_SCHEMA_VERSION = 4
 
 STATUS_DETECTED = "detected"
 STATUS_DIAGNOSING = "diagnosing"
@@ -25,6 +25,11 @@ STATUS_DIAGNOSED = "diagnosed"
 STATUS_FIX_PROPOSED = "fix_proposed"
 STATUS_DIAGNOSIS_FAILED = "diagnosis_failed"
 STATUS_DIAGNOSIS_REFUSED = "diagnosis_refused"
+# Phase 4. fix_validated and fix_failed are the two outcomes of the local
+# validation gate; pr_opened is the separate, opt-in outward-facing step.
+STATUS_FIX_VALIDATED = "fix_validated"
+STATUS_FIX_FAILED = "fix_failed"
+STATUS_PR_OPENED = "pr_opened"
 
 
 class SchemaTooOldError(RuntimeError):
@@ -162,8 +167,10 @@ class Store:
     def write_proposed_fix(self, incident_id: int, diagnosis: dict, proposed_fix: dict) -> None:
         """Records a diagnosis plus a proposed diff, without applying it.
 
-        Phase 3 only records. Phase 4 adds the validation gate (does the
-        diff apply? do the demo app's tests pass?) and opens the PR.
+        Recording is still separate from validating: this only says the
+        model produced a diff. Whether that diff applies and passes tests
+        is `write_validated` / `write_validation_failed`, which run against
+        the repository rather than trusting the proposal.
         """
         self._set(
             incident_id,
@@ -172,6 +179,35 @@ class Store:
             diagnosed_at=_utcnow(),
             proposed_fix=json.dumps(proposed_fix),
         )
+
+    def write_validated(self, incident_id: int, validation: dict) -> None:
+        """The gate applied the diff and the tests passed with it.
+
+        `validation` is stored in its own column rather than merged into
+        `diagnosis` on purpose: one is the model's claim, the other is what
+        this machine independently checked, and a dashboard must be able to
+        tell a proposal from a verified fix.
+        """
+        self._set(
+            incident_id,
+            status=STATUS_FIX_VALIDATED,
+            validation=json.dumps(validation),
+        )
+
+    def write_validation_failed(self, incident_id: int, validation: dict) -> None:
+        """The diff didn't apply, or the tests didn't pass with it.
+
+        Terminal — no PR is opened. The recorded evidence carries git's or
+        pytest's own output so the failure is diagnosable without a rerun.
+        """
+        self._set(
+            incident_id,
+            status=STATUS_FIX_FAILED,
+            validation=json.dumps(validation),
+        )
+
+    def write_pr_opened(self, incident_id: int, pr_url: str) -> None:
+        self._set(incident_id, status=STATUS_PR_OPENED, pr_url=pr_url)
 
     def mark_failed(self, incident_id: int, reason: str) -> None:
         self._set(

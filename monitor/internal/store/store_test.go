@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -262,6 +263,83 @@ func TestOpenMigratesAV2DatabaseAndPreservesData(t *testing.T) {
 	}
 }
 
+func TestOpenMigratesAV3DatabaseAndPreservesData(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "incidents.db")
+
+	// Hand-build a real F3-era database — v1 + v2 + v3 columns at
+	// user_version 3 — carrying a row the diagnosis agent already wrote
+	// back to. That diagnosis must survive the v4 hop: an incident that was
+	// diagnosed before the upgrade is exactly the row Phase 4 then wants to
+	// validate and open a PR for.
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(schemaV1); err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range append(append([]string{}, schemaV2Statements...), schemaV3Statements...) {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 3`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO incidents (created_at, kind, dedup_key, window_start, window_end, evidence,
+		                        updated_at, occurrences, status, diagnosis, diagnosed_at, proposed_fix)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"2026-07-29T12:00:00Z", "error_rate", "error_rate:/checkout",
+		"2026-07-29T12:00:00Z", "2026-07-29T12:00:02Z",
+		`{"summary":"12 errors on POST /checkout"}`,
+		"2026-07-29T12:00:02Z", 1, StatusFixProposed,
+		`{"source":"replay","root_cause":"key type mismatch"}`,
+		"2026-07-29T12:05:00Z", `{"diff":"--- a\n+++ b\n"}`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open must migrate a v3 database, got: %v", err)
+	}
+	defer s.Close()
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version = %d, want %d", version, schemaVersion)
+	}
+
+	// The new v4 columns exist and default to empty for a pre-existing row.
+	var validation, prURL string
+	if err := s.db.QueryRow(
+		`SELECT validation, pr_url FROM incidents WHERE id = 1`,
+	).Scan(&validation, &prURL); err != nil {
+		t.Fatal(err)
+	}
+	if validation != "" || prURL != "" {
+		t.Errorf("expected empty v4 columns on a migrated row, got %q/%q", validation, prURL)
+	}
+
+	// The v3 diagnosis must survive untouched.
+	var status, diagnosis string
+	if err := s.db.QueryRow(
+		`SELECT status, diagnosis FROM incidents WHERE id = 1`,
+	).Scan(&status, &diagnosis); err != nil {
+		t.Fatal(err)
+	}
+	if status != StatusFixProposed || !strings.Contains(diagnosis, "key type mismatch") {
+		t.Errorf("v3 data lost across migration: status=%q diagnosis=%q", status, diagnosis)
+	}
+}
+
 func TestMigrateIsIdempotent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "incidents.db")
 	s1, err := Open(path)
@@ -435,5 +513,62 @@ func TestUpsertKeepsDifferentDedupKeysSeparate(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("different dedup keys must not merge: count = %d, want 2", n)
+	}
+}
+
+func TestOpenSurvivesAConcurrentReaderDuringMigration(t *testing.T) {
+	// Regression test. The monitor used to open the database with no busy
+	// timeout, so any other process holding a read lock for even a few
+	// milliseconds made the migration's `PRAGMA user_version = N` fail with
+	// SQLITE_BUSY — and Open() returns that as a fatal error, killing the
+	// monitor at startup. The agent's test suite hit this roughly one run in
+	// three once the v4 migration widened the window.
+	//
+	// SQLite locking is per-file across processes; a second connection in
+	// this process reproduces it exactly, without needing to spawn one.
+	path := filepath.Join(t.TempDir(), "incidents.db")
+
+	seed, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer seed.Close()
+	if _, err := seed.Exec(schemaV1); err != nil {
+		t.Fatal(err)
+	}
+	// user_version 0 forces the full migration ladder to run on Open.
+	if _, err := seed.Exec(`PRAGMA user_version = 0`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold a read transaction open while the migration runs.
+	reader, err := seed.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Query(`SELECT count(*) FROM incidents`); err != nil {
+		t.Fatal(err)
+	}
+
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		reader.Rollback() //nolint:errcheck // best-effort release
+		close(released)
+	}()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open must wait out a concurrent reader, not die: %v", err)
+	}
+	defer s.Close()
+	<-released
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version = %d, want %d", version, schemaVersion)
 	}
 }

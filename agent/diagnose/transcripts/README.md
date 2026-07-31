@@ -17,6 +17,17 @@ The CLI prints a warning when replaying a hand-authored transcript, and
 the label reaches the stored diagnosis, so nothing downstream (including
 the Phase 5 dashboard) can present scripted turns as a model run.
 
+## The diff has to be real too
+
+A hand-authored transcript is still a demo artifact people read as
+representative, so its `propose_fix` diff must be one `git apply` accepts —
+`test_every_shipped_transcript_proposes_a_diff_that_actually_applies` in
+`agent/tests/test_patch.py` enforces that against a B1-injected checkout.
+
+The first hand-authored transcript failed this: its hunk header was a bare
+`@@` with no line ranges. Nothing noticed until Phase 4 tried to apply it,
+because until then no code path ever did.
+
 ## Recording a real one
 
 ```bash

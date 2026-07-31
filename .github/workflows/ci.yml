@@ -6,6 +6,52 @@ on:
   pull_request:
 
 jobs:
+  # This repo deliberately manufactures broken code: scripts/inject_bug.sh
+  # commits a catalogued bug, and --push publishes it to demo/<bug>-<sha> so a
+  # fix PR has a base that actually contains the bug. Those branches must never
+  # reach main — and GitHub's "Compare & pull request" banner cheerfully offers
+  # exactly that for any branch you just pushed. One such PR was opened by
+  # accident, which is why this job exists: the policy was documented in three
+  # places and enforced in none.
+  guard:
+    name: no injected bug reaches main
+    # Scoped to what can actually land on main. Deliberately not run on pushes
+    # to demo/* branches, where the bug is present on purpose and a red build
+    # would be noise rather than signal.
+    if: >-
+      (github.event_name == 'pull_request' && github.base_ref == 'main')
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: refuse a demo/* branch targeting main
+        if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'demo/')
+        run: |
+          echo "::error::${{ github.head_ref }} carries a deliberately injected bug."
+          echo "Bug branches exist only as the base for a fix PR. Retarget this PR,"
+          echo "or close it — main must never carry an injected bug."
+          exit 1
+
+      # The branch-name check above only catches the naming convention. This one
+      # catches the bug itself, whatever branch it arrives on. A bug patch that
+      # applies cleanly *in reverse* means its "after" state is already in the
+      # tree — i.e. the bug is present. On a pull_request, actions/checkout gives
+      # the merge result, so this tests what main would actually become.
+      - name: refuse a tree containing a catalogued bug
+        run: |
+          status=0
+          for patch in scripts/bugs/*.patch; do
+            if git apply --reverse --check "$patch" 2>/dev/null; then
+              echo "::error::$patch reverse-applies cleanly — that injected bug is present here."
+              status=1
+            fi
+          done
+          if [ "$status" -eq 0 ]; then
+            echo "no catalogued bug present in this tree"
+          fi
+          exit $status
+
   go:
     name: monitor (Go)
     runs-on: ubuntu-latest
