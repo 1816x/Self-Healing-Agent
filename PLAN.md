@@ -122,7 +122,7 @@ docs/        design-decisions.md, architecture.md
 
 **Done when:** at least one real PR exists on this repo with a functional fix for an injected bug. (MVP gate from the spec.)
 
-*Verified live: [PR #6](https://github.com/1816x/Self-Healing-Agent/pull/6) — a one-line fix for B1 against `demo/b1-8f2e079`, all three CI jobs green. The incident walked `detected → diagnosing → fix_proposed → fix_validated → pr_opened`, and `test_checkout_success` was red before the diff and green after it.*
+*Verified live: [PR #6](https://github.com/1816x/Self-Healing-Agent/pull/6) — a one-line fix for B1 against `demo/b1-8f2e079`, all three CI jobs green, **reviewed and merged by a human**. The incident walked `detected → diagnosing → fix_proposed → fix_validated → pr_opened`, and `test_checkout_success` was red before the diff and green after it. The merge is the part the agent deliberately cannot do: it opens, a person decides.*
 
 **Design change this phase forced.** The injected bug commit used to be strictly local, which made the MVP gate unreachable: a fix PR against `main` reverts code `main` has never had. `inject_bug.sh --push` now publishes the bug to `demo/<bug>-<sha>` and the fix PR targets that. The policy narrowed from "never push the injected commit" to "never push it to `main`".
 
@@ -145,7 +145,7 @@ docs/        design-decisions.md, architecture.md
 
 1. ✅ Monitor detects at least 2 distinct failure types in the demo app. *(three: error_rate, latency_p95, memory_growth — all verified live in F1/F2)*
 2. ✅ Agent diagnoses root cause using at least 2 tools (logs + git blame minimum). *(four: read_logs → git_log_recent → git_blame → read_source)*
-3. ✅ At least one real PR opened with a proposed, functional fix. *([PR #6](https://github.com/1816x/Self-Healing-Agent/pull/6), CI green.)*
+3. ✅ At least one real PR opened with a proposed, functional fix. *([PR #6](https://github.com/1816x/Self-Healing-Agent/pull/6), CI green, merged by a human reviewer.)*
 
 **MVP met as of F4.** The remaining honest gap is that both outward calls — the model API and the GitHub API — have only ever been exercised against a sandbox that blocks them. Every layer in between is verified against the real thing.
 

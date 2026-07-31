@@ -70,10 +70,13 @@ and all three detectors, the diagnosis agent, and the auto-fix step that
 validates a proposed diff and opens a pull request.
 
 [**PR #6**](https://github.com/1816x/Self-Healing-Agent/pull/6) is the
-proof — a one-line fix for the B1 bug, opened by the agent, with CI green.
-The incident behind it walked `detected → diagnosing → fix_proposed →
-fix_validated → pr_opened`, and the demo app's `test_checkout_success` was
-red before the diff and green after it.
+proof — a one-line fix for the B1 bug, opened by the agent, CI green, and
+merged by a human reviewer. The incident behind it walked `detected →
+diagnosing → fix_proposed → fix_validated → pr_opened`, and the demo app's
+`test_checkout_success` was red before the diff and green after it.
+
+The merge is the step the agent deliberately cannot take. It investigates,
+proposes, proves the fix works, and stops — a person decides.
 
 Two honest caveats, both the same shape: **neither outward-facing API call
 has ever been made for real.** The environment this was built in has no
