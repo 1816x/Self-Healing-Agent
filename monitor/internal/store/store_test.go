@@ -515,3 +515,60 @@ func TestUpsertKeepsDifferentDedupKeysSeparate(t *testing.T) {
 		t.Errorf("different dedup keys must not merge: count = %d, want 2", n)
 	}
 }
+
+func TestOpenSurvivesAConcurrentReaderDuringMigration(t *testing.T) {
+	// Regression test. The monitor used to open the database with no busy
+	// timeout, so any other process holding a read lock for even a few
+	// milliseconds made the migration's `PRAGMA user_version = N` fail with
+	// SQLITE_BUSY — and Open() returns that as a fatal error, killing the
+	// monitor at startup. The agent's test suite hit this roughly one run in
+	// three once the v4 migration widened the window.
+	//
+	// SQLite locking is per-file across processes; a second connection in
+	// this process reproduces it exactly, without needing to spawn one.
+	path := filepath.Join(t.TempDir(), "incidents.db")
+
+	seed, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer seed.Close()
+	if _, err := seed.Exec(schemaV1); err != nil {
+		t.Fatal(err)
+	}
+	// user_version 0 forces the full migration ladder to run on Open.
+	if _, err := seed.Exec(`PRAGMA user_version = 0`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold a read transaction open while the migration runs.
+	reader, err := seed.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Query(`SELECT count(*) FROM incidents`); err != nil {
+		t.Fatal(err)
+	}
+
+	released := make(chan struct{})
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		reader.Rollback() //nolint:errcheck // best-effort release
+		close(released)
+	}()
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open must wait out a concurrent reader, not die: %v", err)
+	}
+	defer s.Close()
+	<-released
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Errorf("user_version = %d, want %d", version, schemaVersion)
+	}
+}

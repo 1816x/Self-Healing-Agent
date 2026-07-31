@@ -124,8 +124,23 @@ type evidence struct {
 // sample cap (see detect.maxSamples), which bounds a single Incident.
 const maxStoredSamples = 10
 
+// busyTimeout is how long SQLite waits for a lock held by another
+// *process* before giving up. The mutex above only serializes this
+// process's own goroutines; it says nothing about the diagnosis agent or
+// the dashboard, which open the same file whenever they like. Without
+// this, a reader holding a shared lock for a few milliseconds is enough
+// to make the monitor's migration fail with SQLITE_BUSY and kill it at
+// startup — which is exactly what the agent's test suite reproduced once
+// the v4 migration widened the window.
+const busyTimeout = 5 * time.Second
+
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// Encoded as a DSN pragma rather than a `PRAGMA busy_timeout` after
+	// connecting: database/sql pools connections and hands out new ones on
+	// demand, so a pragma run once on one connection would not apply to
+	// the others. The DSN applies to every connection the pool opens.
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(%d)", path, busyTimeout.Milliseconds())
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
