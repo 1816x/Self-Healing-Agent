@@ -86,11 +86,27 @@ def test_every_tool_has_a_description_and_schema():
         assert definition["input_schema"]["type"] == "object"
 
 
-def test_propose_fix_description_says_it_does_not_open_a_pr():
-    """The description is the model's only source of truth about the gate."""
+def test_propose_fix_description_states_what_actually_happens_downstream():
+    """The description is the model's only source of truth about the gate.
+
+    Phase 3 could say the diff was never applied. Phase 4 applies it — to a
+    throwaway checkout, and only opens a PR if the tests pass. Leaving the
+    old wording in place would have been the cheap option and a false one:
+    the model would be told its diff is inert when it no longer is.
+    """
     definition = next(d for d in tool_definitions() if d["name"] == PROPOSE_FIX)
     text = definition["description"].lower()
-    assert "not applied" in text and "pull request" in text
+    assert "does not change the repository" in text
+    assert "pull request" in text
+    assert "merged automatically" in text
+
+
+def test_propose_fix_spells_out_the_diff_format_it_will_be_held_to():
+    """A malformed diff fails the gate, so the format is part of the contract."""
+    definition = next(d for d in tool_definitions() if d["name"] == PROPOSE_FIX)
+    diff_field = definition["input_schema"]["properties"]["diff"]["description"]
+    assert "@@ -12,7 +12,7 @@" in diff_field, "the model needs an example hunk header"
+    assert "bare '@@' is rejected" in diff_field
 
 
 # --- read_logs ---

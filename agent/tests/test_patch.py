@@ -286,3 +286,57 @@ def test_validate_in_reuses_a_worktree_the_caller_owns(repo):
         assert result.ok
         # The fix is present in the tree, ready to be committed and pushed.
         assert (tree / "pkg" / "src.py").read_text() == _SOURCE_FIXED
+
+
+# --- the shipped transcripts ---
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _shipped_fix_diffs() -> list[tuple[str, str]]:
+    """(kind, diff) for every propose_fix call in a shipped transcript."""
+    import json
+
+    from diagnose.replay import TRANSCRIPT_DIR
+
+    found = []
+    for path in sorted(TRANSCRIPT_DIR.glob("*.json")):
+        data = json.loads(path.read_text())
+        for turn in data.get("turns", []):
+            for block in turn.get("content", []):
+                if block.get("name") == "propose_fix":
+                    found.append((data.get("kind", path.stem), block["input"]["diff"]))
+    return found
+
+
+def test_every_shipped_transcript_proposes_a_diff_that_actually_applies():
+    """The defect this gate was written to catch, pinned as a test.
+
+    The Phase 3 transcript shipped a diff with a bare `@@` hunk header. It
+    looked fine in the store and in CLI output, and would have failed the
+    moment anything tried to apply it. A hand-authored transcript is still
+    a demo artifact people will read as representative, so it has to clear
+    the same bar a live diff does.
+
+    Applies against a B1-injected checkout, since that is the state the
+    transcript diagnoses. Tests are deliberately not run here — that would
+    need the demo app's dependencies in the agent CI job, and `applied` is
+    the property this test is about.
+    """
+    diffs = _shipped_fix_diffs()
+    assert diffs, "expected at least one shipped transcript with a propose_fix"
+
+    root = _repo_root()
+    if not (root / "scripts" / "bugs" / "b1.patch").exists():
+        pytest.skip("running outside a full checkout")
+
+    for kind, diff in diffs:
+        with patch.worktree(root) as tree:
+            subprocess.run(
+                ["git", "apply", str(root / "scripts" / "bugs" / "b1.patch")],
+                cwd=tree, check=True, capture_output=True,
+            )
+            result = patch.validate_in(tree, diff, repo_root=root, test_command=())
+            assert result.applied, f"transcript {kind!r} proposes a diff git cannot apply: {result.reason}"

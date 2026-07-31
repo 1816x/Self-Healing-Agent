@@ -32,9 +32,22 @@ limited number of turns.
 
 When you can name both the root cause and the commit responsible, call \
 propose_fix with a minimal unified diff. That call records your finding and \
-ends your turn. The diff is not applied and no pull request is opened by it — \
-a human reviews it first, so be precise rather than defensive: fix the root \
-cause and nothing else.
+ends your turn.
+
+Your diff is checked mechanically before anyone sees it: it is applied to a \
+fresh checkout with `git apply` and the test suite is run. Malformed diffs \
+fail that gate, so the format is not a formality:
+
+- Every file needs both header lines: `--- a/<path>` and `+++ b/<path>`, with \
+repository-relative paths.
+- Every hunk needs a complete header with line ranges — `@@ -12,7 +12,7 @@`. A \
+bare `@@` is rejected outright by git.
+- Include at least three unchanged context lines around each change, and copy \
+them exactly as `read_source` showed them, leading whitespace included. Read \
+the region first if you are not certain of it.
+
+Be precise rather than defensive: fix the root cause and nothing else. No pull \
+request is opened without a human reviewing it.
 
 If the evidence genuinely does not support a conclusion, say so plainly in \
 text instead of calling propose_fix with a guess."""

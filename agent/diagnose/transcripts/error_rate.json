@@ -14,7 +14,9 @@
           "type": "tool_use",
           "id": "toolu_logs",
           "name": "read_logs",
-          "input": {"level": "error"}
+          "input": {
+            "level": "error"
+          }
         }
       ]
     },
@@ -29,7 +31,9 @@
           "type": "tool_use",
           "id": "toolu_log",
           "name": "git_log_recent",
-          "input": {"limit": 5}
+          "input": {
+            "limit": 5
+          }
         }
       ]
     },
@@ -38,13 +42,17 @@
       "content": [
         {
           "type": "thinking",
-          "thinking": "The newest commit claims to be a perf change to checkout's price lookup. That subject is plausible enough to be innocent, so I should not take it at face value — blame the checkout body and see which commit actually owns those lines."
+          "thinking": "The newest commit claims to be a perf change to checkout's price lookup. That subject is plausible enough to be innocent, so I should not take it at face value \u2014 blame the checkout body and see which commit actually owns those lines."
         },
         {
           "type": "tool_use",
           "id": "toolu_blame",
           "name": "git_blame",
-          "input": {"file": "demo-app/app/main.py", "start_line": 90, "end_line": 105}
+          "input": {
+            "file": "demo-app/app/main.py",
+            "start_line": 90,
+            "end_line": 105
+          }
         }
       ]
     },
@@ -53,13 +61,17 @@
       "content": [
         {
           "type": "thinking",
-          "thinking": "Blame confirms the lookup lines belong to that commit. Now read the precomputed table definition and the validation check together — the bug is likely in how the two relate."
+          "thinking": "Blame confirms the lookup lines belong to that commit. Now read the precomputed table definition and the validation check together \u2014 the bug is likely in how the two relate."
         },
         {
           "type": "tool_use",
           "id": "toolu_source",
           "name": "read_source",
-          "input": {"file": "demo-app/app/main.py", "start_line": 22, "end_line": 40}
+          "input": {
+            "file": "demo-app/app/main.py",
+            "start_line": 22,
+            "end_line": 40
+          }
         }
       ]
     },
@@ -77,7 +89,7 @@
           "input": {
             "root_cause": "PRICE_CENTS_BY_ID is built with str(p[\"id\"]) as its keys, while validation checks the incoming product_id against KNOWN_IDS, which holds the raw ints. A request with a valid integer id therefore passes validation and then misses the price table, raising KeyError. Because the miss happens after validation succeeds, every well-formed checkout fails with an unhandled 500 rather than a 4xx.",
             "suspect_commit": "HEAD",
-            "diff": "--- a/demo-app/app/main.py\n+++ b/demo-app/app/main.py\n@@\n-PRICE_CENTS_BY_ID = {str(p[\"id\"]): p[\"price_cents\"] for p in PRODUCTS}\n+PRICE_CENTS_BY_ID = {p[\"id\"]: p[\"price_cents\"] for p in PRODUCTS}\n",
+            "diff": "--- a/demo-app/app/main.py\n+++ b/demo-app/app/main.py\n@@ -28,7 +28,7 @@ PRODUCTS = [\n \n # Precomputed lookups so /checkout stops scanning PRODUCTS per item.\n KNOWN_IDS = {p[\"id\"] for p in PRODUCTS}\n-PRICE_CENTS_BY_ID = {str(p[\"id\"]): p[\"price_cents\"] for p in PRODUCTS}\n+PRICE_CENTS_BY_ID = {p[\"id\"]: p[\"price_cents\"] for p in PRODUCTS}\n \n \n @app.middleware(\"http\")\n",
             "rationale": "Key the price table by the same type validation checks against, so a value that passes KNOWN_IDS cannot miss PRICE_CENTS_BY_ID. Fixing the key type addresses the mismatch itself; coercing at the call site or catching KeyError would only hide it while leaving the two structures disagreeing."
           }
         }
