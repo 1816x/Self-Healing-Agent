@@ -115,12 +115,24 @@ docs/        design-decisions.md, architecture.md
 - **Live — implemented, unverified.** The environment this was built in has no API credentials (no key, no token, no `ant` profile), so no real model call has ever been made through `LiveCompleter`. Its request shape was written against current API docs rather than recalled, and every loop invariant around it is unit-tested with scripted turns — but "the tests pass" is not "the API accepted it." **The first live run is the remaining F3 work**, and until it happens F3 is not closed.
 - **Consequence for the demo:** no recorded transcript exists yet, so the shipped one is hand-authored and labeled `origin: hand_authored` everywhere it surfaces (`source: "replay-scripted"` in the store, a warning on the CLI). `--record` on the first live run replaces it with a real one.
 
-### F4 — Auto-fix + PR (3-6 commits)
-- [ ] `propose_fix` produces a diff; validation gate: applies cleanly + demo-app tests pass
-- [ ] Branch + PR opened via GitHub API with diagnosis narrative in the body
-- [ ] Iteration cap and failure handling (diff doesn't apply / tests fail → incident marked `fix_failed`, no PR)
+### F4 — Auto-fix + PR (9 commits) — ✅ closed 2026-07-31
+- [x] `propose_fix` produces a diff; validation gate: applies cleanly + demo-app tests pass
+- [x] Branch + PR opened via GitHub API with diagnosis narrative in the body
+- [x] Failure handling (diff doesn't apply / tests fail → incident marked `fix_failed`, no PR)
 
 **Done when:** at least one real PR exists on this repo with a functional fix for an injected bug. (MVP gate from the spec.)
+
+*Verified live: [PR #6](https://github.com/1816x/Self-Healing-Agent/pull/6) — a one-line fix for B1 against `demo/b1-8f2e079`, all three CI jobs green. The incident walked `detected → diagnosing → fix_proposed → fix_validated → pr_opened`, and `test_checkout_success` was red before the diff and green after it.*
+
+**Design change this phase forced.** The injected bug commit used to be strictly local, which made the MVP gate unreachable: a fix PR against `main` reverts code `main` has never had. `inject_bug.sh --push` now publishes the bug to `demo/<bug>-<sha>` and the fix PR targets that. The policy narrowed from "never push the injected commit" to "never push it to `main`".
+
+**Caveat, same shape as F3's.** The agent built the request, pushed the branch, and produced the body itself, but the final `POST /pulls` came from the session's GitHub tooling — this sandbox's `GITHUB_TOKEN` is proxied and 403s on direct API calls. The opener's own HTTP path is therefore still unproven against real GitHub, exactly like `LiveCompleter`. It failed correctly, which is the next best thing: the incident stayed `fix_validated` with the error attached rather than losing its evidence.
+
+**Four defects this phase surfaced, none of them in the new code's happy path:**
+1. The monitor died at startup on `SQLITE_BUSY` whenever another process held a read lock during migration — a real cross-process bug that presented as a flaky test fixture.
+2. The Phase 3 transcript's diff had a bare `@@` hunk header and could never have applied. Nothing noticed because nothing had ever tried.
+3. The gate validated against `HEAD` while the PR targeted a base branch, so unrelated commits leaked into the first PR.
+4. `ruff>=0.7` let CI and local machines enforce different rule sets.
 
 ### F5 — Dashboard + release (4-6 commits)
 - [ ] Next.js dashboard: incident list with pipeline states, detail view with tool-call trace and diff
@@ -131,9 +143,11 @@ docs/        design-decisions.md, architecture.md
 
 ## Definition of done (MVP, from the spec)
 
-1. Monitor detects at least 2 distinct failure types in the demo app.
-2. Agent diagnoses root cause using at least 2 tools (logs + git blame minimum).
-3. At least one real PR opened with a proposed, functional fix.
+1. ✅ Monitor detects at least 2 distinct failure types in the demo app. *(three: error_rate, latency_p95, memory_growth — all verified live in F1/F2)*
+2. ✅ Agent diagnoses root cause using at least 2 tools (logs + git blame minimum). *(four: read_logs → git_log_recent → git_blame → read_source)*
+3. ✅ At least one real PR opened with a proposed, functional fix. *([PR #6](https://github.com/1816x/Self-Healing-Agent/pull/6), CI green.)*
+
+**MVP met as of F4.** The remaining honest gap is that both outward calls — the model API and the GitHub API — have only ever been exercised against a sandbox that blocks them. Every layer in between is verified against the real thing.
 
 ## Working agreements (from COMMIT-STRATEGY.md)
 

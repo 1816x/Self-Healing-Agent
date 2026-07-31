@@ -17,10 +17,14 @@ of it: no agent framework, every layer explicit and explainable end to end.
 ## Important: the bugs are on purpose
 
 The demo app's failures are **injected as real, deliberate commits**
-(`scripts/inject_bug.sh`, landing in Phase 1) — not accidents. That's what
-makes the whole loop reproducible: anyone who clones this repo can trigger
-the same incident, watch the same detection, and see the same agent
-diagnosis, every time. See the bug catalog in `PLAN.md`.
+(`scripts/inject_bug.sh`) — not accidents. That's what makes the whole loop
+reproducible: anyone who clones this repo can trigger the same incident,
+watch the same detection, and see the same agent diagnosis, every time.
+See the bug catalog in `PLAN.md`.
+
+If you see a branch named `demo/b1-<sha>`, or a pull request whose base is
+one, that is an injected bug and its fix — deliberate, and never merged
+into `main`.
 
 ## Architecture
 
@@ -58,16 +62,23 @@ no message broker, no services to babysit.
 
 ## Status
 
-Phases 0-2 done: the demo app, the monitor daemon, and all three detectors
-(error-rate, p95 latency, memory growth) work end to end against real
-injected bugs.
+**The MVP loop is closed.** Phases 0-4 are done: the demo app, the monitor
+and all three detectors, the diagnosis agent, and the auto-fix step that
+validates a proposed diff and opens a pull request.
 
-Phase 3 (the diagnosis agent) is code-complete with one honest caveat: the
-offline path is verified end to end, but **no live API call has been made
-yet**, because the environment it was built in had no credentials. The
-request shape was written against current API docs and every loop
-invariant is unit-tested, but that isn't the same as the API accepting it —
-so the first live run is the remaining Phase 3 work. Details in `PLAN.md`.
+[**PR #6**](https://github.com/1816x/Self-Healing-Agent/pull/6) is the
+proof — a one-line fix for the B1 bug, opened by the agent, with CI green.
+The incident behind it walked `detected → diagnosing → fix_proposed →
+fix_validated → pr_opened`, and the demo app's `test_checkout_success` was
+red before the diff and green after it.
+
+Two honest caveats, both the same shape: **neither outward-facing API call
+has ever been made for real.** The environment this was built in has no
+model credentials and a proxied GitHub token that rejects direct API
+calls, so `LiveCompleter` has never talked to the model API and the PR
+opener's own HTTP request has never been accepted by GitHub. Everything
+between those two edges is verified against the real thing — real git,
+real tests, a real pull request. Details in `PLAN.md`.
 
 See `docs/design-decisions.md` for why the architecture looks the way it
 does, including what got rejected.
@@ -110,5 +121,28 @@ falls back to rule-based triage that says `NOT A MODEL DIAGNOSIS`. It never
 presents scripted turns as model output — see
 `agent/diagnose/transcripts/README.md`.
 
-Undo an injection before trying another: `git reset --hard HEAD~1` (the
-injected commit is local-only — `inject_bug.sh` never pushes it).
+Then ship the fix. The agent applies the diff to a throwaway `git
+worktree`, runs the demo app's tests there, and only then offers to open a
+pull request:
+
+```bash
+scripts/inject_bug.sh b1 --push          # publish the bug to demo/b1-<sha>
+python -m diagnose --db incidents.db --offline --dry-run-pr \
+    --base-branch demo/b1-<sha>          # see the PR without sending it
+python -m diagnose --db incidents.db --offline --open-pr \
+    --base-branch demo/b1-<sha>          # actually open it
+```
+
+The gate runs every time; `--open-pr` is opt-in, and nothing is ever
+merged automatically. A diff that doesn't apply, or that leaves the tests
+red, marks the incident `fix_failed` and opens nothing.
+
+**Why the bug gets its own branch.** A fix PR needs a base that actually
+contains the bug — against `main` it would revert code `main` has never
+had, so it could neither apply nor pass CI. `--push` publishes the
+injected commit to `demo/<bug>-<sha>` and the fix PR targets that.
+**`main` never carries an injected bug**, and `inject_bug.sh` refuses to
+publish from it.
+
+Undo an injection before trying another: `git reset --hard HEAD~1`, and
+`git push origin --delete demo/<bug>-<sha>` if you published it.
