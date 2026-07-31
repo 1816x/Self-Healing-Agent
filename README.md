@@ -14,6 +14,12 @@ of it: no agent framework, every layer explicit and explainable end to end.
 
 > **CI:** ![CI](https://github.com/1816x/Self-Healing-Agent/actions/workflows/ci.yml/badge.svg)
 
+![The loop: inject a bug, the monitor detects it, the agent diagnoses it, the gate validates the fix](docs/assets/demo.svg)
+
+*A real recorded session — `inject_bug.sh` commits the bug, the error-rate
+detector fires, the agent drives its read-only tools to a root cause, and the
+validation gate proves the proposed diff turns the tests from red to green.*
+
 ## Important: the bugs are on purpose
 
 The demo app's failures are **injected as real, deliberate commits**
@@ -65,9 +71,10 @@ no message broker, no services to babysit.
 
 ## Status
 
-**The MVP loop is closed.** Phases 0-4 are done: the demo app, the monitor
-and all three detectors, the diagnosis agent, and the auto-fix step that
-validates a proposed diff and opens a pull request.
+**v0.1.0 — the loop is closed end to end.** All five phases are done: the
+demo app, the monitor and all three detectors, the diagnosis agent, the
+auto-fix step that validates a proposed diff and opens a pull request, and
+the dashboard that shows each incident moving through it.
 
 [**PR #6**](https://github.com/1816x/Self-Healing-Agent/pull/6) is the
 proof — a one-line fix for the B1 bug, opened by the agent, CI green, and
@@ -89,6 +96,48 @@ real tests, a real pull request. Details in `PLAN.md`.
 See `docs/design-decisions.md` for why the architecture looks the way it
 does, including what got rejected.
 
+## The design decisions, in one paragraph each
+
+The long version, with what was rejected and what turned out wrong, is in
+`docs/design-decisions.md`. The short version:
+
+- **Go for the monitor** — the observability ecosystem is Go, and the
+  monitor is the piece that would live next to Prometheus and Kubernetes.
+- **Bugs injected as real commits** — the most interviewable decision here.
+  `git blame` is only meaningful if there is a genuinely guilty commit, so
+  `inject_bug.sh` commits one with an innocent message. It also means CI has
+  to enforce that no injected bug reaches `main`, which it does by
+  reverse-applying every catalogued patch against the merge result.
+- **One SQLite file as the contract** between Go, Python and TypeScript. No
+  broker, no services. Go owns every schema change; the other two assert the
+  version they need.
+- **Five read-only tools and one gated write.** `propose_fix` is terminal,
+  and a diff it produces must apply cleanly *and* turn the tests from red to
+  green before a pull request opens. Nothing is ever auto-merged.
+- **Offline mode from Phase 3**, so a stranger can run the whole loop with no
+  API key — and labelled everywhere it surfaces, because a hand-authored
+  transcript must never read as a model diagnosis.
+- **The dashboard cannot write.** It opens SQLite read-only; re-running an
+  incident is a CLI flag.
+
+## Dashboard
+
+```bash
+cd dashboard && npm install && npm run dev     # http://localhost:3000
+```
+
+Reads `incidents.db` (override with `INCIDENTS_DB`) and shows each incident's
+pipeline state, the agent's tool-call trace, the diff it proposed, and — kept
+deliberately separate — what the validation gate independently checked.
+
+![Incident list showing each incident's position in the pipeline](docs/assets/dashboard-list.png)
+
+![Incident detail: evidence, provenance banner, tool-call trace, diff and gate record](docs/assets/dashboard-detail.png)
+
+The orange banner in the second shot is the point: those turns are a
+hand-authored transcript, not model output, and the UI says so above the root
+cause rather than in a corner.
+
 ## Quickstart
 
 ```bash
@@ -109,17 +158,19 @@ Within seconds the corresponding detector fires and an incident lands in
 sqlite3 incidents.db 'SELECT id, kind, status, occurrences, evidence FROM incidents;'
 ```
 
-Then diagnose it. No API key needed:
+**The agent then picks it up on its own** — `run_demo.sh` installs it and
+polls for new incidents, so diagnosis needs no second command and no API key.
+It claims the incident, drives its read-only tools (`read_logs` →
+`git_log_recent` → `git_blame` → `read_source`) against this repository, and
+records a root cause plus a proposed diff.
+
+Pass `--no-agent` for detection only, or `--live` to diagnose with a real
+model call. To drive it by hand instead:
 
 ```bash
 cd agent && pip install -e ".[dev]" && cd ..
 python -m diagnose --db incidents.db --offline --repo-root .
 ```
-
-The agent claims the incident, drives its read-only tools (`read_logs` →
-`git_log_recent` → `git_blame` → `read_source`) against this repository,
-and records a root cause plus a proposed diff on the incident. Drop
-`--offline` to call the API for real.
 
 Offline mode tells you what it is: with no recorded model session it either
 replays a hand-authored transcript (labeled `source: "replay-scripted"`) or
@@ -142,6 +193,19 @@ python -m diagnose --db incidents.db --offline --open-pr \
 The gate runs every time; `--open-pr` is opt-in, and nothing is ever
 merged automatically. A diff that doesn't apply, or that leaves the tests
 red, marks the incident `fix_failed` and opens nothing.
+
+**Picking an incident back up.** The demo's poller stops at `fix_proposed`,
+because cutting a worktree and running pytest every few seconds unattended is
+not something a demo should do. `--resume` is how a stored fix gets driven
+through the gate afterwards — it runs the gate over the recorded diff without
+calling the model again, since the diff is already there:
+
+```bash
+python -m diagnose --db incidents.db --offline --resume --base-branch demo/b1-<sha>
+```
+
+The same flag reclaims an incident whose agent process died mid-run, using a
+lease on how long it has sat in `diagnosing` (`--lease-age`, default 15m).
 
 **Why the bug gets its own branch.** A fix PR needs a base that actually
 contains the bug — against `main` it would revert code `main` has never

@@ -607,6 +607,156 @@ regression — but with a Phase 4 pipeline behind it, a resume path is worth
 having. Left for Phase 5, where the dashboard will want to trigger reruns
 anyway.
 
-## Phase 5 onward
+## Phase 5 — the dashboard, the resume path, and v0.1.0
+
+### The resume path, and the one thing it must not do
+
+Phase 4 left this gap open above. Closing it was mostly obvious — widen
+the claim set, add a lease for claims whose owner died — but one decision
+in it was not.
+
+A resumed `fix_proposed` incident **must not re-run the model.** The diff
+is already in the row. Re-deriving it would spend a real API call
+reproducing work that is sitting in front of us, and would overwrite the
+diagnosis that produced the diff with a second, possibly different one —
+so the incident's stored reasoning would no longer be the reasoning
+behind its stored fix. The resumed run goes straight to the gate. The
+test asserts it by making any model or replay turn raise.
+
+Terminal statuses stay terminal under `--resume`. A diff the gate
+rejected does not become valid on a second reading, and `mark_refused`
+already argues that re-sending the same prompt is pointless. Only
+`fix_proposed` — a resting state, not a verdict — is resumable.
+
+`reclaim_stale_diagnosing` is the first code in the project to read
+`updated_at` back, which surfaced that the column has two meanings: Go
+writes event time, Python writes wall clock. Reading it as wall clock is
+sound *only* because Go never writes `diagnosing` — it produces
+`detected` and nothing else. That reasoning is now in the docstring,
+because the next person to read that column will not get the same warning.
+
+The lease defaults to 15 minutes. The property that matters is not
+reclaiming quickly but not reclaiming too early: two agents diagnosing
+one incident is exactly what the conditional UPDATE was written to
+prevent, and a lease that expires mid-run reintroduces it by the back
+door.
+
+### `node:sqlite`, not a native module
+
+The dashboard reads SQLite through Node's standard library rather than
+`better-sqlite3`. No native module means no build step in CI and no
+prebuilt-binary lottery, and — the deciding reason — its `readOnly: true`
+is a real SQLite mode. "The dashboard cannot write to the store" is
+enforced by the database instead of by reviewer attention.
+
+The cost is an experimental API and a Node ≥ 22.6 floor. Both are
+contained: every `node:sqlite` reference lives in `lib/db.ts`, and the
+Node version is pinned in `.nvmrc` the same way Go's comes from `go.mod`.
+
+### The dashboard is read-only, and reruns stayed a CLI flag
+
+The Phase 4 note above guessed the dashboard would want to trigger
+reruns. It doesn't. A rerun button needs a write handle, which forfeits
+the guarantee above, and a "run the agent" endpoint would put process
+spawning in a web app that renders model-authored content — the precise
+thing the PR opener's guardrails were written against. `--resume` covers
+the same need from the CLI, where the blast radius is a terminal.
+
+Reads open and close around one query. The store is rollback-journal, not
+WAL, and this project has twice been bitten by long-lived reader handles:
+one killed the monitor's startup migration, one wedged the agent's test
+suite. Verified rather than assumed — the monitor ran throughout a
+hammering read loop and never logged `SQLITE_BUSY`.
+
+### The row mapper is where this schema's sharp edges get paid for
+
+Two properties make a naive TypeScript mapper wrong. **Nothing is SQL
+`NULL`** — every column after v1 is `NOT NULL DEFAULT ''`, so "not
+reached this stage" is the empty string and `JSON.parse("")` throws. And
+**`diagnosis` has four shapes, `validation` three**: a model result, an
+error, a refusal, a heuristic fallback; a gate record, a gate record plus
+a PR error, a bare error. Both are discriminated unions, so a component
+cannot destructure the wrong arm. Malformed JSON degrades to a
+`malformed` arm carrying the raw text rather than throwing — three
+languages write this file, and one bad blob must not 500 a page that
+would otherwise show six good incidents.
+
+`fix_validated` renders as two different states, because it is two:
+with `validation.pr_error` the fix is verified and the pull request
+failed; without it, no pull request was attempted. Collapsing them would
+undo the Phase 4 decision that a network error is not a failed fix.
+
+### Provenance is a banner, not a badge
+
+`replay-scripted` and `heuristic` drove the real tool loop against the
+real repository, but no model produced those turns. The CLI shouts about
+it. A badge in the corner of a card would technically disclose the same
+fact while letting a scripted transcript read as a model diagnosis on the
+way past, so it renders above the root cause where the eye hits it first.
+`isModelOutput()` fails closed on an unrecognised source.
+
+### No index migration, and the diff parser is hand-written
+
+The `incidents` table still has zero indexes. Adding a v5 migration to
+serve a dashboard's `ORDER BY` at three-digit row counts would spend the
+Go-owns-all-DDL rule on nothing. Recorded here instead of implemented.
+
+The diff renderer is about fifteen lines: a unified diff is line-oriented
+and classifying a line is a switch on its first character — with
+`---`/`+++` checked before `-`/`+`, or every diff opens with a phantom
+deleted line. A dependency would have been larger than the parser and
+harder to explain.
+
+### Two defects the one-command demo surfaced
+
+Phase 5's gate — a stranger runs one command and watches the whole loop —
+meant running the agent automatically for the first time. Both of these
+had been latent since Phase 2 and Phase 4 respectively; nothing had ever
+exercised the path that revealed them.
+
+**1 — A claimed incident stopped absorbing its own re-firings.** The
+monitor's dedup query matched only rows in `detected`. While nothing
+moved incidents out of that status, every re-firing merged correctly and
+Phase 2's "one incident, not fifty" held. The moment the agent started
+claiming incidents within seconds, a still-firing condition found no
+`detected` row for its key and opened a *new* incident every detector
+cycle — 28 incidents from one injected bug in two minutes. The lookup no
+longer filters by status, and a firing whose incident is already claimed
+is `Suppressed`: not merged, because rewriting evidence under an agent
+mid-diagnosis is why the filter existed; not inserted, because the
+condition is already on record and being worked. Staleness moved from
+`updated_at` to `window_end`, which only this package writes and which is
+always event time — the old code avoided that timebase mix only by never
+reading a row the agent had touched.
+
+**2 — The validation gate ran the tests with the wrong interpreter.**
+`DEFAULT_TEST_COMMAND` began with a bare `"python"`, resolved from PATH.
+In the scripted demo the app and agent live in `demo-app/.venv` while
+PATH still points at a system interpreter with no fastapi, so the gate
+applied a perfectly good diff and reported `ModuleNotFoundError` — a
+verdict about the environment wearing the costume of a verdict about the
+diff. It would have marked a working fix `fix_failed`. Now
+`sys.executable`: the tests run under the same interpreter as the agent.
+
+Both are the same shape as Phase 4's four: not in the new code's happy
+path, and invisible until something actually ran the combination.
+
+### What Phase 5 did not verify, stated plainly
+
+**The two outward-facing calls are still unproven, for the third phase
+running.** They were re-checked at the start of this phase, not assumed:
+`ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are unset in this
+environment, and `GET https://api.github.com/repos/1816x/Self-Healing-Agent`
+returns 403 through the sandbox's proxy while `/user` returns 200 — so it
+is scoping, not a dead token. `LiveCompleter` has still never talked to
+the model API and the PR opener's own `POST /pulls` has still never been
+accepted by GitHub.
+
+This is recorded the same way Phases 3 and 4 recorded it, and v0.1.0
+ships with it stated rather than quietly dropped because the project
+reached its last phase. Everything between those two edges is verified
+against the real thing: real git, real tests, a real pull request, a real
+browser against a real database.
+
 
 To be filled in as each phase closes.
