@@ -75,7 +75,11 @@ docs/        design-decisions.md, architecture.md
 
 ## Where it ended up
 
-v0.1.0, 2026-07-31. Five phases, all closed, in the order planned. Three
+v0.1.0, 2026-07-31 — tag cut from `main` once F5's pull request merges, since
+a release tag on an unmerged feature branch would point at history `main`
+never had. Notes are written and committed at `docs/release-notes-v0.1.0.md`.
+
+Five phases, all closed, in the order planned. Three
 detectors rather than the two the MVP required, four tools driving each
 diagnosis rather than the two, and one real merged pull request
 ([#6](https://github.com/1816x/Self-Healing-Agent/pull/6)) authored by the
@@ -144,10 +148,11 @@ in `docs/design-decisions.md`, and in the release notes.
 3. The gate validated against `HEAD` while the PR targeted a base branch, so unrelated commits leaked into the first PR.
 4. `ruff>=0.7` let CI and local machines enforce different rule sets.
 
-### F5 — Dashboard + release (10 commits) — ✅ closed 2026-07-31
+### F5 — Dashboard + release (11 commits) — ⚠️ code complete 2026-07-31, tag pending merge
 - [x] Next.js dashboard: incident list with pipeline states, detail view with tool-call trace and diff
 - [x] README polish: demo animation, quickstart, design-decisions summary
-- [x] `chore(release): tag v0.1.0` + GitHub Release with notes
+- [x] Release notes written (`docs/release-notes-v0.1.0.md`)
+- [ ] `chore(release): tag v0.1.0` + GitHub Release — **after the phase PR merges**
 - [x] Resume path for stranded incidents — the gap F4 deferred here
 - [x] `run_demo.sh` drives the whole loop, so the done-when gate is one command
 
