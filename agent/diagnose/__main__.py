@@ -278,10 +278,30 @@ def _ship(store: Store, incident: Incident, diagnosis: dict, proposed_fix: dict,
 
     try:
         return _validate_and_open(store, incident, diagnosis, proposed_fix, args, repo_root, base)
+    except _PRFailed as exc:
+        # A pull request that could not be opened is not a fix that failed
+        # validation. The first version of this collapsed the two, and a
+        # GitHub 403 overwrote a genuine "applied cleanly, tests red before
+        # and green after" record with fix_failed — throwing away the one
+        # piece of evidence the run had actually established. The status
+        # stays fix_validated, because that is what happened.
+        store.write_validated(incident.id, {**exc.validation, "pr_error": str(exc.__cause__ or exc)})
+        print(f"error: {exc.__cause__ or exc}", file=sys.stderr)
+        print("status: fix_validated — the fix is verified, but no pull request was opened",
+              file=sys.stderr)
+        return 1
     except Exception as exc:  # noqa: BLE001 — an incident must never be left mid-flight
         store.write_validation_failed(incident.id, {"ok": False, "error": str(exc)})
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+
+class _PRFailed(RuntimeError):
+    """Opening the pull request failed after the fix had already validated."""
+
+    def __init__(self, validation: dict):
+        super().__init__("could not open the pull request")
+        self.validation = validation
 
 
 def _validate_and_open(
@@ -293,9 +313,16 @@ def _validate_and_open(
     repo_root: Path,
     base: str,
 ) -> int:
-    print(f"\nvalidating the proposed diff against {base} in a throwaway worktree")
+    base_ref = _resolve_base_ref(repo_root, base)
+    print(f"\nvalidating the proposed diff against {base_ref} in a throwaway worktree")
 
-    with patch.worktree(repo_root, base_ref="HEAD") as tree:
+    # The worktree is cut from the branch the pull request will target, not
+    # from HEAD. When those differ — and they do the moment anything is
+    # committed after the bug was published — validating against HEAD tests
+    # one tree while proposing a change to another, and every commit in
+    # between leaks into the pull request. Caught by reading the first real
+    # PR this produced, which carried an unrelated refactor.
+    with patch.worktree(repo_root, base_ref=base_ref) as tree:
         result = patch.validate_in(
             tree,
             proposed_fix.get("diff", ""),
@@ -317,7 +344,12 @@ def _validate_and_open(
             print("(pass --open-pr to open a pull request, or --dry-run-pr to preview one)")
             return 0
 
-        return _open_pull_request(store, incident, diagnosis, proposed_fix, result, args, repo_root, tree, base)
+        try:
+            return _open_pull_request(
+                store, incident, diagnosis, proposed_fix, result, args, repo_root, tree, base
+            )
+        except Exception as exc:
+            raise _PRFailed(result.as_record()) from exc
 
 
 def _open_pull_request(
@@ -362,6 +394,26 @@ def _open_pull_request(
     store.write_pr_opened(incident.id, opened.url)
     print(f"status: pr_opened -> {opened.url}")
     return 0
+
+
+def _resolve_base_ref(repo_root: Path, base: str) -> str:
+    """The commit the pull request will actually be diffed against.
+
+    Prefers `origin/<base>`, because that is the state GitHub will compare
+    to and run CI on; a stale or missing local branch of the same name
+    would validate against something the reviewer never sees. Falls back to
+    the plain name for a base that only exists locally.
+    """
+    import subprocess
+
+    for candidate in (f"origin/{base}", base):
+        found = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}"],
+            cwd=repo_root, capture_output=True, text=True, check=False,
+        )
+        if found.returncode == 0:
+            return candidate
+    raise RuntimeError(f"base branch {base!r} does not exist locally or on origin")
 
 
 def _current_branch(repo_root: Path) -> str:

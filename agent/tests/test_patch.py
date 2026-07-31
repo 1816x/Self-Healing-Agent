@@ -332,11 +332,20 @@ def test_every_shipped_transcript_proposes_a_diff_that_actually_applies():
     if not (root / "scripts" / "bugs" / "b1.patch").exists():
         pytest.skip("running outside a full checkout")
 
+    b1 = str(root / "scripts" / "bugs" / "b1.patch")
     for kind, diff in diffs:
         with patch.worktree(root) as tree:
-            subprocess.run(
-                ["git", "apply", str(root / "scripts" / "bugs" / "b1.patch")],
-                cwd=tree, check=True, capture_output=True,
-            )
+            if subprocess.run(
+                ["git", "apply", "--check", b1], cwd=tree, capture_output=True
+            ).returncode == 0:
+                subprocess.run(["git", "apply", b1], cwd=tree, check=True, capture_output=True)
+            elif subprocess.run(
+                ["git", "apply", "--reverse", "--check", b1], cwd=tree, capture_output=True
+            ).returncode != 0:
+                pytest.skip("HEAD is neither clean nor B1-injected; cannot stage the transcript's state")
+            # else: HEAD already carries B1 — running the demo leaves it
+            # committed, and a developer who then runs the tests should not
+            # see a spurious failure.
+
             result = patch.validate_in(tree, diff, repo_root=root, test_command=())
             assert result.applied, f"transcript {kind!r} proposes a diff git cannot apply: {result.reason}"

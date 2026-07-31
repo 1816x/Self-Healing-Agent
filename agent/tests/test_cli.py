@@ -69,6 +69,9 @@ def repo(tmp_path: Path) -> Path:
     _git(root, "add", "-A")
     _git(root, "commit", "-qm", "perf: precompute lookup table")
     _git(root, "remote", "add", "origin", "https://github.com/1816x/Self-Healing-Agent.git")
+    # The base a fix PR targets: the branch carrying the injected bug, as
+    # `inject_bug.sh --push` would have published it.
+    _git(root, "branch", "demo/b1-abc1234")
     return root
 
 
@@ -205,7 +208,43 @@ def test_open_pr_without_a_token_fails_loudly_rather_than_silently(real_schema_d
 
     assert code == 1
     row = _row(real_schema_db, incident_id)
-    assert "GITHUB_TOKEN" in json.loads(row["validation"])["error"]
+    assert "GITHUB_TOKEN" in json.loads(row["validation"])["pr_error"]
+
+
+def test_a_failed_pull_request_does_not_erase_a_passing_validation(real_schema_db, repo, monkeypatch):
+    """A GitHub outage is not a verdict on the fix.
+
+    The first version of this collapsed both into fix_failed, so a 403
+    from GitHub overwrote a genuine "applied cleanly, red before, green
+    after" record — discarding the only thing the run had established.
+    Found on the first real end-to-end run, where the sandbox's token
+    could not reach the API.
+    """
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    monkeypatch.setattr(cli.pr, "push_branch", lambda *a, **k: "0" * 40)
+
+    def refuse(*_a, **_k):
+        raise cli.pr.PROpenError("GitHub refused the pull request (HTTP 403)")
+
+    monkeypatch.setattr(cli.pr, "create_pull_request", refuse)
+
+    incident_id = insert_incident(real_schema_db)
+    with Store(str(real_schema_db)) as store:
+        incident = store.claim(incident_id)
+        code = cli._ship(
+            store, incident, DIAGNOSIS, {"diff": GOOD_DIFF, "rationale": "r"},
+            _args(repo, open_pr=True),
+        )
+
+    assert code == 1, "the run did not achieve what was asked of it"
+    row = _row(real_schema_db, incident_id)
+    assert row["status"] == store_mod.STATUS_FIX_VALIDATED, (
+        "the fix did validate; only the PR failed"
+    )
+    record = json.loads(row["validation"])
+    assert record["proves_a_fix"] is True, "the validation evidence must survive"
+    assert "403" in record["pr_error"]
+    assert row["pr_url"] == ""
 
 
 def test_open_pr_records_the_url_on_success(real_schema_db, repo, monkeypatch):
@@ -244,7 +283,8 @@ def test_a_third_party_remote_stops_the_pr_and_marks_it_failed(real_schema_db, r
 
     assert code == 1
     row = _row(real_schema_db, incident_id)
-    assert "someone-else/their-repo" in json.loads(row["validation"])["error"]
+    assert row["pr_url"] == "", "a refused repository must never produce a PR"
+    assert "someone-else/their-repo" in json.loads(row["validation"])["pr_error"]
 
 
 def test_base_branch_defaults_to_the_branch_the_bug_is_on(repo):
@@ -252,3 +292,43 @@ def test_base_branch_defaults_to_the_branch_the_bug_is_on(repo):
     without it could not apply, let alone pass CI."""
     _git(repo, "checkout", "-q", "-b", "demo/b1-deadbee")
     assert cli._current_branch(repo) == "demo/b1-deadbee"
+
+
+def test_validation_uses_the_base_branch_not_head(real_schema_db, repo, capsys):
+    """Validate the tree the PR targets, or the PR carries unrelated commits.
+
+    The first real PR this pipeline produced contained an unrelated
+    refactor, because the gate cut its worktree from HEAD while the PR
+    targeted a base branch published several commits earlier. Everything
+    in between rode along.
+    """
+    _git(repo, "branch", "demo/b1-base")
+    # A commit that exists on HEAD but not on the base branch.
+    (repo / "unrelated.txt").write_text("not part of the fix\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "unrelated work")
+
+    incident_id = insert_incident(real_schema_db)
+    with Store(str(real_schema_db)) as store:
+        incident = store.claim(incident_id)
+        code = cli._ship(
+            store, incident, DIAGNOSIS, {"diff": GOOD_DIFF, "rationale": "r"},
+            _args(repo, base_branch="demo/b1-base"),
+        )
+
+    assert code == 0
+    assert "demo/b1-base" in capsys.readouterr().out
+
+
+def test_a_missing_base_branch_is_reported_rather_than_guessed(real_schema_db, repo):
+    incident_id = insert_incident(real_schema_db)
+    with Store(str(real_schema_db)) as store:
+        incident = store.claim(incident_id)
+        code = cli._ship(
+            store, incident, DIAGNOSIS, {"diff": GOOD_DIFF, "rationale": "r"},
+            _args(repo, base_branch="demo/never-existed"),
+        )
+
+    assert code == 1
+    row = _row(real_schema_db, incident_id)
+    assert "demo/never-existed" in json.loads(row["validation"])["error"]
