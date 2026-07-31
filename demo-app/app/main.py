@@ -26,6 +26,10 @@ PRODUCTS = [
     {"id": 3, "name": "gizmo", "price_cents": 999},
 ]
 
+# Precomputed lookups so /checkout stops scanning PRODUCTS per item.
+KNOWN_IDS = {p["id"] for p in PRODUCTS}
+PRICE_CENTS_BY_ID = {str(p["id"]): p["price_cents"] for p in PRODUCTS}
+
 
 @app.middleware("http")
 async def instrument_requests(request: Request, call_next):
@@ -96,10 +100,9 @@ def checkout(payload: dict) -> dict:
 
     total_cents = 0
     for pid in product_ids:
-        match = next((p for p in PRODUCTS if p["id"] == pid), None)
-        if match is None:
+        if pid not in KNOWN_IDS:
             raise HTTPException(status_code=404, detail=f"unknown product_id {pid}")
-        total_cents += match["price_cents"]
+        total_cents += PRICE_CENTS_BY_ID[pid]
 
     return {"total_cents": total_cents, "item_count": len(product_ids)}
 
