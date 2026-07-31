@@ -28,7 +28,7 @@ PRODUCTS = [
 
 # Precomputed lookups so /checkout stops scanning PRODUCTS per item.
 KNOWN_IDS = {p["id"] for p in PRODUCTS}
-PRICE_CENTS_BY_ID = {str(p["id"]): p["price_cents"] for p in PRODUCTS}
+PRICE_CENTS_BY_ID = {p["id"]: p["price_cents"] for p in PRODUCTS}
 
 
 @app.middleware("http")
