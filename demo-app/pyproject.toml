@@ -13,7 +13,9 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "httpx>=0.27",
-    "ruff>=0.7",
+    # Bounded for the same reason as agent/pyproject.toml: an open-ended
+    # ruff means CI and a developer's machine can enforce different rules.
+    "ruff>=0.16,<0.17",
 ]
 
 [build-system]

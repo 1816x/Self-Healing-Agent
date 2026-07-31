@@ -10,7 +10,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
-    "ruff>=0.7",
+    # Bounded, not open-ended. `ruff>=0.7` meant CI installed whatever was
+    # newest while a developer kept whatever they had: 0.16 promoted ISC004
+    # out of preview and failed a build that was green locally on 0.15.
+    # A linter that disagrees with itself across machines is worse than a
+    # slightly older one.
+    "ruff>=0.16,<0.17",
 ]
 
 [build-system]
@@ -22,3 +27,9 @@ packages = ["diagnose"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
+# Selected explicitly rather than inherited from whatever this ruff version
+# happens to default to — the same drift the version bound above addresses,
+# from the other direction.
+extend-select = ["ISC"]

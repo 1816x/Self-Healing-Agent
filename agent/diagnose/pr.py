@@ -172,8 +172,10 @@ def build_body(
         "",
         "## What was verified",
         "",
-        f"- Applied to a throwaway checkout of `{base}`: "
-        f"{'yes' if validation.applied else 'no'}",
+        (
+            f"- Applied to a throwaway checkout of `{base}`: "
+            f"{'yes' if validation.applied else 'no'}"
+        ),
         f"- Demo app tests before the patch: `{validation.tests_before}`",
         f"- Demo app tests after the patch: `{validation.tests_after}`",
     ]
@@ -200,8 +202,10 @@ def build_body(
         "",
         "---",
         "",
-        "Opened by the self-healing agent. Nothing here was merged automatically — "
-        "this branch exists for a human to review.",
+        (
+            "Opened by the self-healing agent. Nothing here was merged automatically — "
+            "this branch exists for a human to review."
+        ),
     ]
     return "\n".join(lines)
 

@@ -336,11 +336,11 @@ def test_every_shipped_transcript_proposes_a_diff_that_actually_applies():
     for kind, diff in diffs:
         with patch.worktree(root) as tree:
             if subprocess.run(
-                ["git", "apply", "--check", b1], cwd=tree, capture_output=True
+                ["git", "apply", "--check", b1], cwd=tree, capture_output=True, check=False
             ).returncode == 0:
                 subprocess.run(["git", "apply", b1], cwd=tree, check=True, capture_output=True)
             elif subprocess.run(
-                ["git", "apply", "--reverse", "--check", b1], cwd=tree, capture_output=True
+                ["git", "apply", "--reverse", "--check", b1], cwd=tree, capture_output=True, check=False
             ).returncode != 0:
                 pytest.skip("HEAD is neither clean nor B1-injected; cannot stage the transcript's state")
             # else: HEAD already carries B1 — running the demo leaves it
