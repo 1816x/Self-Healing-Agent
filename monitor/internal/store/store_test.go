@@ -376,12 +376,12 @@ func TestUpsertInsertsWhenNoOpenIncidentExists(t *testing.T) {
 	}
 	defer s.Close()
 
-	id, merged, err := s.UpsertIncident(testIncident(), 2*time.Minute)
+	id, outcome, err := s.UpsertIncident(testIncident(), 2*time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if merged {
-		t.Error("first firing must insert, not merge")
+	if outcome != Inserted {
+		t.Errorf("first firing must insert, got %v", outcome)
 	}
 	if id != 1 {
 		t.Errorf("id = %d, want 1", id)
@@ -410,12 +410,12 @@ func TestUpsertMergesAFlappingSignalIntoOneRow(t *testing.T) {
 		refire.WindowStart = base.WindowStart.Add(time.Duration(i) * 10 * time.Second)
 		refire.WindowEnd = refire.WindowStart.Add(3 * time.Second)
 		refire.Samples = []string{"refire evidence"}
-		id, merged, err := s.UpsertIncident(refire, 2*time.Minute)
+		id, outcome, err := s.UpsertIncident(refire, 2*time.Minute)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !merged {
-			t.Fatalf("refire %d: expected a merge, got a new row", i)
+		if outcome != Merged {
+			t.Fatalf("refire %d: expected a merge, got %v", i, outcome)
 		}
 		if id != firstID {
 			t.Fatalf("refire %d: id = %d, want the original %d", i, id, firstID)
@@ -465,12 +465,12 @@ func TestUpsertOpensANewIncidentAfterDedupWindowElapses(t *testing.T) {
 	later := testIncident()
 	later.WindowStart = base.WindowStart.Add(5 * time.Minute) // well past the 1-minute window
 	later.WindowEnd = later.WindowStart.Add(3 * time.Second)
-	secondID, merged, err := s.UpsertIncident(later, time.Minute)
+	secondID, outcome, err := s.UpsertIncident(later, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if merged {
-		t.Error("a firing after the dedup window elapsed must open a new incident")
+	if outcome != Inserted {
+		t.Errorf("a firing after the dedup window elapsed must open a new incident, got %v", outcome)
 	}
 	if secondID == firstID {
 		t.Error("expected a distinct row for the new occurrence")
@@ -482,6 +482,106 @@ func TestUpsertOpensANewIncidentAfterDedupWindowElapses(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("count = %d, want 2 separate incidents", n)
+	}
+}
+
+func TestUpsertSuppressesAFiringWhoseIncidentIsAlreadyClaimed(t *testing.T) {
+	// The Phase 5 regression this exists to prevent: while the dedup query
+	// was filtered to `detected` rows, an incident the agent had claimed
+	// became invisible to it, so a still-firing condition opened a brand new
+	// incident on every detector cycle. Running the agent automatically in
+	// the demo turned "one incident, not fifty" into fifty.
+	path := filepath.Join(t.TempDir(), "incidents.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	base := testIncident()
+	firstID, _, err := s.UpsertIncident(base, 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The agent claims it, exactly as store.py's conditional UPDATE does.
+	if _, err := s.db.Exec(
+		`UPDATE incidents SET status = ? WHERE id = ?`, StatusDiagnosing, firstID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	refire := testIncident()
+	refire.WindowStart = base.WindowEnd.Add(3 * time.Second)
+	refire.WindowEnd = refire.WindowStart.Add(3 * time.Second)
+	id, outcome, err := s.UpsertIncident(refire, 2*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != Suppressed {
+		t.Errorf("outcome = %v, want Suppressed — the incident is already being worked on", outcome)
+	}
+	if id != firstID {
+		t.Errorf("id = %d, want the claimed incident %d", id, firstID)
+	}
+
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM incidents`).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Errorf("row count = %d, want 1 — suppression must not insert", total)
+	}
+
+	// Suppression must also leave the claimed row untouched: rewriting its
+	// evidence under an agent that is mid-diagnosis is the other half of why
+	// merging into a claimed incident is wrong.
+	var occurrences int
+	var status string
+	if err := s.db.QueryRow(
+		`SELECT occurrences, status FROM incidents WHERE id = ?`, firstID,
+	).Scan(&occurrences, &status); err != nil {
+		t.Fatal(err)
+	}
+	if occurrences != 1 || status != StatusDiagnosing {
+		t.Errorf("claimed row was modified: occurrences = %d, status = %q", occurrences, status)
+	}
+}
+
+func TestUpsertOpensANewIncidentAfterAClaimedOneGoesStale(t *testing.T) {
+	// Suppression is bounded by the same dedup window as merging. A failure
+	// that recurs long after a previous incident was claimed is genuinely new
+	// and must not be swallowed forever.
+	path := filepath.Join(t.TempDir(), "incidents.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	base := testIncident()
+	firstID, _, err := s.UpsertIncident(base, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(
+		`UPDATE incidents SET status = ? WHERE id = ?`, StatusPROpened, firstID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	later := testIncident()
+	later.WindowStart = base.WindowStart.Add(5 * time.Minute)
+	later.WindowEnd = later.WindowStart.Add(3 * time.Second)
+	secondID, outcome, err := s.UpsertIncident(later, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != Inserted {
+		t.Errorf("outcome = %v, want Inserted — the old incident is long closed", outcome)
+	}
+	if secondID == firstID {
+		t.Error("expected a distinct row for the new occurrence")
 	}
 }
 

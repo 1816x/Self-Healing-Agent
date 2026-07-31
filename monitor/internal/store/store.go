@@ -100,6 +100,33 @@ const (
 	StatusPROpened  = "pr_opened"
 )
 
+// UpsertOutcome says what UpsertIncident did with a firing. Three outcomes,
+// because a sustained failure produces far more firings than incidents and
+// the daemon's log should distinguish "new problem" from "still happening"
+// from "already being worked on".
+type UpsertOutcome int
+
+const (
+	// Inserted: this firing opened a new incident row.
+	Inserted UpsertOutcome = iota
+	// Merged: it extended an existing incident still waiting to be picked up.
+	Merged
+	// Suppressed: an incident for this condition already exists and has been
+	// claimed downstream. Nothing was written.
+	Suppressed
+)
+
+func (o UpsertOutcome) String() string {
+	switch o {
+	case Merged:
+		return "ongoing"
+	case Suppressed:
+		return "already claimed"
+	default:
+		return "new"
+	}
+}
+
 type Store struct {
 	db *sql.DB
 	// SQLite allows one writer at a time. Phase 2 adds a second goroutine
@@ -266,57 +293,77 @@ func insert(x execer, incident *detect.Incident, occurrences int) (int64, error)
 //
 // This is what turns a flapping signal into one incident row instead of
 // one per detector reset — the gap the Phase 1 live run surfaced.
-func (s *Store) UpsertIncident(incident *detect.Incident, dedupWindow time.Duration) (id int64, merged bool, err error) {
+func (s *Store) UpsertIncident(incident *detect.Incident, dedupWindow time.Duration) (id int64, outcome UpsertOutcome, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	tx, err := s.db.Begin()
 	if err != nil {
-		return 0, false, fmt.Errorf("begin: %w", err)
+		return 0, Inserted, fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op once committed
 
 	var existingID int64
-	var existingUpdatedAt, existingEvidence string
+	var existingStatus, existingWindowEnd, existingEvidence string
 	var existingOccurrences int
+	// Deliberately not filtered by status. Restricting this to `detected`
+	// rows made a claimed incident invisible here, so a still-firing
+	// condition opened a brand new incident every detector cycle once the
+	// agent started picking them up — the exact "one incident, not fifty"
+	// property Phase 2 exists to provide.
 	row := tx.QueryRow(
-		`SELECT id, updated_at, evidence, occurrences FROM incidents
-		 WHERE dedup_key = ? AND status = ?
-		 ORDER BY updated_at DESC LIMIT 1`,
-		incident.DedupKey, StatusDetected,
+		`SELECT id, status, window_end, evidence, occurrences FROM incidents
+		 WHERE dedup_key = ?
+		 ORDER BY id DESC LIMIT 1`,
+		incident.DedupKey,
 	)
-	scanErr := row.Scan(&existingID, &existingUpdatedAt, &existingEvidence, &existingOccurrences)
+	scanErr := row.Scan(&existingID, &existingStatus, &existingWindowEnd, &existingEvidence, &existingOccurrences)
 
 	switch {
 	case scanErr == sql.ErrNoRows:
 		newID, insertErr := insert(tx, incident, 1)
 		if insertErr != nil {
-			return 0, false, insertErr
+			return 0, Inserted, insertErr
 		}
 		if err := tx.Commit(); err != nil {
-			return 0, false, fmt.Errorf("commit: %w", err)
+			return 0, Inserted, fmt.Errorf("commit: %w", err)
 		}
-		return newID, false, nil
+		return newID, Inserted, nil
 
 	case scanErr != nil:
-		return 0, false, fmt.Errorf("query existing incident: %w", scanErr)
+		return 0, Inserted, fmt.Errorf("query existing incident: %w", scanErr)
 	}
 
-	lastUpdate, parseErr := time.Parse(time.RFC3339, existingUpdatedAt)
-	if parseErr != nil || incident.WindowStart.Sub(lastUpdate) > dedupWindow {
+	// window_end, not updated_at: window_end is always this store's event
+	// time, written only here and in insert(). updated_at is shared with the
+	// Python agent, which writes wall-clock into it on every state change —
+	// comparing that against a detector's event clock mixes two timebases.
+	lastFiring, parseErr := time.Parse(time.RFC3339, existingWindowEnd)
+	if parseErr != nil || incident.WindowStart.Sub(lastFiring) > dedupWindow {
 		newID, insertErr := insert(tx, incident, 1)
 		if insertErr != nil {
-			return 0, false, insertErr
+			return 0, Inserted, insertErr
 		}
 		if err := tx.Commit(); err != nil {
-			return 0, false, fmt.Errorf("commit: %w", err)
+			return 0, Inserted, fmt.Errorf("commit: %w", err)
 		}
-		return newID, false, nil
+		return newID, Inserted, nil
+	}
+
+	// Within the window, but something downstream already owns this row.
+	// Merging would rewrite evidence under an agent that is mid-diagnosis,
+	// and inserting would duplicate a condition already being worked. So
+	// this firing is dropped: the incident is on record and in progress.
+	if existingStatus != StatusDetected {
+		if err := tx.Commit(); err != nil {
+			return 0, Suppressed, fmt.Errorf("commit: %w", err)
+		}
+		return existingID, Suppressed, nil
 	}
 
 	var prev evidence
 	if err := json.Unmarshal([]byte(existingEvidence), &prev); err != nil {
-		return 0, false, fmt.Errorf("unmarshal existing evidence: %w", err)
+		return 0, Merged, fmt.Errorf("unmarshal existing evidence: %w", err)
 	}
 	mergedEvidence := evidence{
 		Summary: incident.Summary,
@@ -329,7 +376,7 @@ func (s *Store) UpsertIncident(incident *detect.Incident, dedupWindow time.Durat
 	}
 	blob, err := json.Marshal(mergedEvidence)
 	if err != nil {
-		return 0, false, fmt.Errorf("marshal merged evidence: %w", err)
+		return 0, Merged, fmt.Errorf("marshal merged evidence: %w", err)
 	}
 
 	windowEnd := incident.WindowEnd.UTC().Format(time.RFC3339)
@@ -343,12 +390,12 @@ func (s *Store) UpsertIncident(incident *detect.Incident, dedupWindow time.Durat
 		existingID,
 	)
 	if err != nil {
-		return 0, false, fmt.Errorf("update incident: %w", err)
+		return 0, Merged, fmt.Errorf("update incident: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, false, fmt.Errorf("commit: %w", err)
+		return 0, Merged, fmt.Errorf("commit: %w", err)
 	}
-	return existingID, true, nil
+	return existingID, Merged, nil
 }
 
 // CountByStatus is a small helper for tests and the daemon's own logging.
