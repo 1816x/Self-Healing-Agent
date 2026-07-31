@@ -24,7 +24,10 @@ See the bug catalog in `PLAN.md`.
 
 If you see a branch named `demo/b1-<sha>`, or a pull request whose base is
 one, that is an injected bug and its fix — deliberate, and never merged
-into `main`.
+into `main`. CI enforces that: the `guard` job fails any pull request into
+`main` whose tree contains a catalogued bug, or that comes from a `demo/*`
+branch. Documentation alone wasn't enough — an accidental "Compare & pull
+request" click proposed exactly that merge once.
 
 ## Architecture
 
