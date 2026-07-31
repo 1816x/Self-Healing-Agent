@@ -123,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
 
     with store:
         incident = (
-            store.claim(args.incident_id) if args.incident_id else store.claim_next_detected()
+            store.claim(args.incident_id) if args.incident_id else store.claim_next()
         )
         if incident is None:
             target = f"incident #{args.incident_id}" if args.incident_id else "any incident"
