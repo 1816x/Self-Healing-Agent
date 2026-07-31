@@ -263,8 +263,6 @@ def _print_summary(diagnosis: dict, *, status: str) -> None:
         print(f"tools used: {', '.join(call['tool'] for call in calls)}")
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
 
 
 def _ship(store: Store, incident: Incident, diagnosis: dict, proposed_fix: dict, args) -> int:
@@ -380,3 +378,7 @@ def _current_branch(repo_root: Path) -> str:
         cwd=repo_root, capture_output=True, text=True, check=False,
     )
     return completed.stdout.strip() or "main"
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
