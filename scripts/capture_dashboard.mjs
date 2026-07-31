@@ -43,15 +43,20 @@ async function importPlaywright() {
 const base = process.argv[2] ?? "http://127.0.0.1:3111";
 const outDir = process.argv[3] ?? "docs/assets";
 
-const SHOTS = [
-  { file: "dashboard-list.png", route: "/", height: 1180 },
-  { file: "dashboard-detail.png", route: "/incidents/2", height: 1600 },
-];
-
 await mkdir(outDir, { recursive: true });
 
 const browser = await chromium.launch();
 try {
+  // Which incident to show in the detail shot is discovered from the list
+  // rather than hardcoded: a freshly run demo has one incident, a seeded
+  // database has several, and a stale id would silently screenshot a 404.
+  const detailRoute = await firstIncidentRoute(browser, base);
+
+  const SHOTS = [
+    { file: "dashboard-list.png", route: "/", height: 1180 },
+    { file: "dashboard-detail.png", route: detailRoute, height: 1600 },
+  ];
+
   for (const shot of SHOTS) {
     const page = await browser.newPage({
       viewport: { width: 1180, height: shot.height },
@@ -69,4 +74,21 @@ try {
   }
 } finally {
   await browser.close();
+}
+
+async function firstIncidentRoute(browser, base) {
+  const page = await browser.newPage();
+  try {
+    await page.goto(base, { waitUntil: "networkidle" });
+    const href = await page.getAttribute('a[href^="/incidents/"]', "href");
+    if (!href) {
+      throw new Error(
+        "the incident list is empty — run scripts/run_demo.sh and inject a bug, " +
+          "or seed a database with scripts/seed_dashboard_db.py",
+      );
+    }
+    return href;
+  } finally {
+    await page.close();
+  }
 }
