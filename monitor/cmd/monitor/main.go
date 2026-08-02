@@ -50,17 +50,20 @@ func main() {
 		if incident == nil {
 			return
 		}
-		id, merged, err := incidents.UpsertIncident(incident, *dedupWindow)
+		id, outcome, err := incidents.UpsertIncident(incident, *dedupWindow)
 		if err != nil {
 			log.Printf("ALERT dropped, upsert failed: %v", err)
 			return
 		}
-		verb := "new"
-		if merged {
-			verb = "ongoing"
+		if outcome == store.Suppressed {
+			// The condition is still firing but its incident has already been
+			// picked up. Logged quietly: it is neither news nor a problem.
+			log.Printf("still firing: %s — incident #%d is already being worked on",
+				incident.Kind, id)
+			return
 		}
 		log.Printf("ALERT incident #%d (%s): %s — %s [%s .. %s]",
-			id, verb, incident.Kind, incident.Summary,
+			id, outcome, incident.Kind, incident.Summary,
 			incident.WindowStart.Format(time.RFC3339),
 			incident.WindowEnd.Format(time.RFC3339))
 	}

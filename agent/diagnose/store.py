@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Self
 
 # Must match monitor/internal/store/store.go's schemaVersion. The agent
@@ -30,6 +31,20 @@ STATUS_DIAGNOSIS_REFUSED = "diagnosis_refused"
 STATUS_FIX_VALIDATED = "fix_validated"
 STATUS_FIX_FAILED = "fix_failed"
 STATUS_PR_OPENED = "pr_opened"
+
+# The default claim set: a normal run only ever picks up fresh incidents.
+CLAIMABLE_DEFAULT = (STATUS_DETECTED,)
+
+# What `--resume` adds. `fix_proposed` is a resting state only `--no-validate`
+# produces: the model finished and its diff was stored, but nothing ever ran
+# the validation gate over it. Before Phase 5 that row was unreachable, because
+# every claim hardcoded `detected`.
+CLAIMABLE_RESUME = (STATUS_DETECTED, STATUS_FIX_PROPOSED)
+
+# How long an incident may sit in `diagnosing` before a resumed run assumes the
+# process holding it died. Nothing renews a lease mid-run, so this has to
+# exceed the longest plausible tool loop rather than the average one.
+DEFAULT_LEASE_SECONDS = 900
 
 
 class SchemaTooOldError(RuntimeError):
@@ -55,8 +70,12 @@ class Incident:
         return f"incident #{self.id} ({self.kind}): {summary}"
 
 
+def _isoformat(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _utcnow() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _isoformat(datetime.now(UTC))
 
 
 class Store:
@@ -97,19 +116,22 @@ class Store:
         ).fetchone()
         return _row_to_incident(row) if row else None
 
-    def claim_next_detected(self) -> Incident | None:
-        """Claims the oldest `detected` incident, or returns None.
+    def claim_next(self, statuses: Sequence[str] = CLAIMABLE_DEFAULT) -> Incident | None:
+        """Claims the oldest incident in one of `statuses`, or returns None.
 
         The claim is a conditional UPDATE guarded by the current status, so
         two agent processes racing on the same store can't both pick up the
-        same incident: exactly one UPDATE reports a changed row.
+        same incident: exactly one UPDATE reports a changed row. Widening
+        `statuses` doesn't weaken that — the UPDATE still names the exact set
+        it selected against.
         """
+        placeholders = ", ".join("?" for _ in statuses)
         self._db.execute("BEGIN IMMEDIATE")
         try:
             row = self._db.execute(
-                """SELECT id FROM incidents WHERE status = ?
-                   ORDER BY id LIMIT 1""",
-                (STATUS_DETECTED,),
+                f"""SELECT id FROM incidents WHERE status IN ({placeholders})
+                    ORDER BY id LIMIT 1""",
+                tuple(statuses),
             ).fetchone()
             if row is None:
                 self._db.execute("COMMIT")
@@ -117,9 +139,9 @@ class Store:
 
             incident_id = row["id"]
             cursor = self._db.execute(
-                """UPDATE incidents SET status = ?, updated_at = ?
-                   WHERE id = ? AND status = ?""",
-                (STATUS_DIAGNOSING, _utcnow(), incident_id, STATUS_DETECTED),
+                f"""UPDATE incidents SET status = ?, updated_at = ?
+                    WHERE id = ? AND status IN ({placeholders})""",
+                (STATUS_DIAGNOSING, _utcnow(), incident_id, *statuses),
             )
             if cursor.rowcount != 1:
                 # Another process claimed it between the SELECT and UPDATE.
@@ -132,16 +154,83 @@ class Store:
 
         return self.get(incident_id)
 
-    def claim(self, incident_id: int) -> Incident | None:
-        """Claims one specific incident by id. Same guard as claim_next_detected."""
+    def claim(
+        self, incident_id: int, statuses: Sequence[str] = CLAIMABLE_DEFAULT
+    ) -> Incident | None:
+        """Claims one specific incident by id. Same guard as claim_next."""
+        placeholders = ", ".join("?" for _ in statuses)
         cursor = self._db.execute(
-            """UPDATE incidents SET status = ?, updated_at = ?
-               WHERE id = ? AND status = ?""",
-            (STATUS_DIAGNOSING, _utcnow(), incident_id, STATUS_DETECTED),
+            f"""UPDATE incidents SET status = ?, updated_at = ?
+                WHERE id = ? AND status IN ({placeholders})""",
+            (STATUS_DIAGNOSING, _utcnow(), incident_id, *statuses),
         )
         if cursor.rowcount != 1:
             return None
         return self.get(incident_id)
+
+    def reclaim_stale_diagnosing(self, max_age_seconds: int) -> Incident | None:
+        """Reclaims an incident abandoned in `diagnosing`, or returns None.
+
+        A process killed between `claim()` and any writer leaves its row
+        claimed forever: the CLI's broad excepts guarantee a *terminal* status
+        on every path it survives, but SIGKILL is not a path it survives.
+        This is the reaper for that case, and the first code to read
+        `updated_at` back.
+
+        That column has mixed semantics — Go writes event time, Python writes
+        wall clock (`_set`). Reading it as wall clock is only sound because Go
+        never writes `diagnosing`; it produces `detected` and nothing else. So
+        every row this can match was last touched by `_set`.
+        """
+        cutoff = _isoformat(datetime.now(UTC) - timedelta(seconds=max_age_seconds))
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            row = self._db.execute(
+                """SELECT id FROM incidents
+                   WHERE status = ? AND updated_at != '' AND updated_at < ?
+                   ORDER BY id LIMIT 1""",
+                (STATUS_DIAGNOSING, cutoff),
+            ).fetchone()
+            if row is None:
+                self._db.execute("COMMIT")
+                return None
+
+            incident_id = row["id"]
+            # Re-assert both predicates: another resumed run may have taken it,
+            # and the original process may have come back to life and written.
+            cursor = self._db.execute(
+                """UPDATE incidents SET updated_at = ?
+                   WHERE id = ? AND status = ? AND updated_at < ?""",
+                (_utcnow(), incident_id, STATUS_DIAGNOSING, cutoff),
+            )
+            if cursor.rowcount != 1:
+                self._db.execute("COMMIT")
+                return None
+            self._db.execute("COMMIT")
+        except Exception:
+            self._db.execute("ROLLBACK")
+            raise
+
+        return self.get(incident_id)
+
+    def read_fix_record(self, incident_id: int) -> tuple[dict, dict]:
+        """Returns the stored `(diagnosis, proposed_fix)` for an incident.
+
+        A resumed `fix_proposed` incident already has both — re-running the
+        model to recover them would spend a real API call reproducing work
+        that is sitting in the row. Kept as its own reader rather than added
+        to `Incident`, which every other call site would then carry.
+
+        Absent columns are the empty string, not NULL, so "" means "never
+        written" and decodes to {}.
+        """
+        row = self._db.execute(
+            "SELECT diagnosis, proposed_fix FROM incidents WHERE id = ?",
+            (incident_id,),
+        ).fetchone()
+        if row is None:
+            return {}, {}
+        return _decode_blob(row["diagnosis"]), _decode_blob(row["proposed_fix"])
 
     def count_by_status(self, status: str) -> int:
         return self._db.execute(
@@ -238,6 +327,22 @@ class Store:
             f"UPDATE incidents SET status = ?, updated_at = ?, {assignments} WHERE id = ?",
             [status, _utcnow(), *values, incident_id],
         )
+
+
+def _decode_blob(raw: str) -> dict:
+    """Decodes one of the JSON columns, treating unset and corrupt alike.
+
+    Every column added after schema v1 is `NOT NULL DEFAULT ''`, so "not
+    written yet" arrives as the empty string and `json.loads` would raise on
+    it. A caller asking for a fix that isn't there wants {}, not an exception.
+    """
+    if not raw:
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def _row_to_incident(row: sqlite3.Row) -> Incident:

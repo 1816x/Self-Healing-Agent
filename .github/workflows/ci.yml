@@ -118,5 +118,35 @@ jobs:
         working-directory: agent
         run: pytest -q
 
-  # TypeScript job (dashboard) added in Phase 5, once the Next.js app exists —
-  # see PLAN.md and docs/design-decisions.md for why it isn't here yet.
+  dashboard:
+    name: dashboard (TypeScript)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Same rule as go-version-file above: one source of truth, in the
+          # project rather than copied into this file. The dashboard reads
+          # SQLite through node:sqlite, so the floor is a real constraint and
+          # not a preference.
+          node-version-file: dashboard/.nvmrc
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      # `npm ci` rather than `npm install`: the lockfile decides. Same lesson
+      # as pinning ruff — a build that resolves its own dependency versions
+      # fails on someone else's schedule.
+      - name: install
+        run: npm ci
+      - name: lint
+        run: npm run lint
+      - name: typecheck
+        run: npm run typecheck
+      # node --test with type stripping — the row mapper is tested with no test
+      # framework at all, against fixtures copied from what Go and Python write.
+      - name: test
+        run: npm test
+      - name: build
+        run: npm run build

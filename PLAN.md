@@ -73,6 +73,20 @@ scripts/     inject_bug.sh, run_demo.sh
 docs/        design-decisions.md, architecture.md
 ```
 
+## Where it ended up
+
+v0.1.0, 2026-07-31 — tag cut from `main` once F5's pull request merges, since
+a release tag on an unmerged feature branch would point at history `main`
+never had. Notes are written and committed at `docs/release-notes-v0.1.0.md`.
+
+Five phases, all closed, in the order planned. Three
+detectors rather than the two the MVP required, four tools driving each
+diagnosis rather than the two, and one real merged pull request
+([#6](https://github.com/1816x/Self-Healing-Agent/pull/6)) authored by the
+agent and reviewed by a human. The one gap that stayed open the whole way —
+neither outward API call ever being made for real — is stated in the README,
+in `docs/design-decisions.md`, and in the release notes.
+
 ## Phases
 
 ### F0 — Scaffolding (3-5 commits) — ✅ closed 2026-07-28, PR #1
@@ -134,12 +148,25 @@ docs/        design-decisions.md, architecture.md
 3. The gate validated against `HEAD` while the PR targeted a base branch, so unrelated commits leaked into the first PR.
 4. `ruff>=0.7` let CI and local machines enforce different rule sets.
 
-### F5 — Dashboard + release (4-6 commits)
-- [ ] Next.js dashboard: incident list with pipeline states, detail view with tool-call trace and diff
-- [ ] README polish: demo GIF, quickstart, design-decisions summary
-- [ ] `chore(release): tag v0.1.0` + GitHub Release with notes
+### F5 — Dashboard + release (11 commits) — ⚠️ code complete 2026-07-31, tag pending merge
+- [x] Next.js dashboard: incident list with pipeline states, detail view with tool-call trace and diff
+- [x] README polish: demo animation, quickstart, design-decisions summary
+- [x] Release notes written (`docs/release-notes-v0.1.0.md`)
+- [ ] `chore(release): tag v0.1.0` + GitHub Release — **after the phase PR merges**
+- [x] Resume path for stranded incidents — the gap F4 deferred here
+- [x] `run_demo.sh` drives the whole loop, so the done-when gate is one command
 
 **Done when:** v0.1.0 tagged; a stranger can clone, run `run_demo.sh`, and watch the loop happen offline.
+
+*Verified live: from a clean checkout, `run_demo.sh` in one terminal and `inject_bug.sh b1` in another produced detection **and** diagnosis with no further commands — incident #1 walked `detected → diagnosing → fix_proposed` through the real tool chain (`read_logs → git_log_recent → git_blame → read_source`), and `--resume` then drove the stored diff through the gate to `fix_validated` with tests red before and green after. The dashboard rendered that incident from a read-only handle while the monitor kept writing, with no `SQLITE_BUSY`. Every asset in the README was captured from that run.*
+
+**Estimate missed, deliberately.** Planned at 4-6 commits, landed at ten. The resume path (deferred here by F4) and the `run_demo.sh` gate were folded in, and two defects surfaced that had to be fixed before the demo was honest. Recorded rather than smoothed over — the working agreements ask what actually happened versus what was planned.
+
+**Two defects this phase surfaced, both latent for phases.** Running the agent automatically was the first thing that ever exercised these paths:
+1. The monitor's dedup matched only `detected` rows, so once the agent claimed an incident within seconds, a still-firing condition opened a new one every cycle — 28 incidents from one bug in two minutes, breaking F2's "one incident, not fifty" without any F2 test noticing.
+2. The validation gate ran the demo app's tests with `python` from PATH rather than the interpreter running the agent, so in the scripted demo it reported `ModuleNotFoundError` and would have marked a working fix `fix_failed`.
+
+**The design change F4 predicted, reversed.** F4 guessed the dashboard would want to trigger reruns and deferred the resume path on that basis. It doesn't: a rerun button needs a write handle, which forfeits the read-only guarantee, and a process-spawning endpoint in a web app rendering model-authored content is what the PR opener's guardrails exist to prevent. `--resume` covers it from the CLI instead.
 
 ## Definition of done (MVP, from the spec)
 
@@ -148,6 +175,8 @@ docs/        design-decisions.md, architecture.md
 3. ✅ At least one real PR opened with a proposed, functional fix. *([PR #6](https://github.com/1816x/Self-Healing-Agent/pull/6), CI green, merged by a human reviewer.)*
 
 **MVP met as of F4.** The remaining honest gap is that both outward calls — the model API and the GitHub API — have only ever been exercised against a sandbox that blocks them. Every layer in between is verified against the real thing.
+
+**Re-checked at F5, not assumed.** `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are unset in this environment, and `GET https://api.github.com/repos/1816x/Self-Healing-Agent` returns 403 through the sandbox proxy while `/user` returns 200 — scoping, not a dead token. So the gap stands at v0.1.0, and ships stated rather than dropped because the project reached its last phase. Closing it needs one live run with real credentials: `python -m diagnose --record` for the model half, and `--open-pr` from an environment whose token reaches GitHub for the other.
 
 ## Working agreements (from COMMIT-STRATEGY.md)
 

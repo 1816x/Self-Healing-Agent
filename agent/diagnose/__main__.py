@@ -5,6 +5,7 @@
     python -m diagnose --record                  # live, and save the transcript
     python -m diagnose --offline --dry-run-pr    # validate, print the PR, send nothing
     python -m diagnose --offline --open-pr       # validate and open a real PR
+    python -m diagnose --resume                  # also pick up incidents left stranded
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from pathlib import Path
 
 from . import client as client_mod
 from . import heuristic, loop, patch, pr, replay
+from . import store as store_mod
 from .prompts import incident_briefing
 from .store import Incident, SchemaTooOldError, Store
 from .tools import Toolbox
@@ -73,6 +75,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Demo app metrics endpoint.",
     )
 
+    # --- Phase 5: picking up incidents a previous run left behind ---
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=(
+            "Also pick up incidents a previous run left stranded: a stored fix "
+            "that never reached the gate, or a claim held by a process that died."
+        ),
+    )
+    parser.add_argument(
+        "--lease-age",
+        type=int,
+        default=store_mod.DEFAULT_LEASE_SECONDS,
+        help=(
+            "With --resume, seconds an incident may sit in 'diagnosing' before "
+            f"its claim is assumed dead (default {store_mod.DEFAULT_LEASE_SECONDS})."
+        ),
+    )
+
     # --- Phase 4: validation and the pull request ---
     parser.add_argument(
         "--no-validate",
@@ -122,13 +143,28 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     with store:
-        incident = (
-            store.claim(args.incident_id) if args.incident_id else store.claim_next_detected()
-        )
+        incident = _claim(store, args)
         if incident is None:
             target = f"incident #{args.incident_id}" if args.incident_id else "any incident"
-            print(f"nothing to do: no {target} in 'detected' state.")
+            states = "'detected'" if not args.resume else "a resumable state"
+            print(f"nothing to do: no {target} in {states}.")
             return 0
+
+        # A resumed incident may already carry a diff a previous run stored but
+        # never validated. Re-running the loop would spend a real model call
+        # reproducing work that is sitting in the row, and would overwrite the
+        # diagnosis that produced it.
+        stored_diagnosis, stored_fix = store.read_fix_record(incident.id)
+        if stored_fix.get("diff"):
+            print(f"resuming {incident.summary_line()}")
+            print("a proposed fix is already recorded — running the gate over it, not the model")
+            if args.no_validate:
+                # Nothing left to do: --no-validate is exactly the flag that
+                # parked this incident here in the first place.
+                store.write_proposed_fix(incident.id, stored_diagnosis, stored_fix)
+                print("--no-validate: leaving it at 'fix_proposed'")
+                return 0
+            return _ship(store, incident, stored_diagnosis, stored_fix, args)
 
         print(f"diagnosing {incident.summary_line()}")
         repo_root = Path(args.repo_root)
@@ -146,6 +182,36 @@ def main(argv: list[str] | None = None) -> int:
         if proposed_fix is None or args.no_validate:
             return exit_code
         return _ship(store, incident, diagnosis, proposed_fix, args)
+
+
+def _claim(store: Store, args) -> Incident | None:
+    """Takes ownership of one incident, honouring --resume.
+
+    Order matters: fresh and parked incidents are tried before the stale
+    sweep, so a reaper never steals a claim while there is uncontested work.
+    """
+    statuses = store_mod.CLAIMABLE_RESUME if args.resume else store_mod.CLAIMABLE_DEFAULT
+
+    if args.incident_id:
+        claimed = store.claim(args.incident_id, statuses)
+        if claimed is not None or not args.resume:
+            return claimed
+        # Explicitly named, in a resumable state this claim set doesn't cover:
+        # the only remaining possibility is a claim whose owner died.
+        stale = store.reclaim_stale_diagnosing(args.lease_age)
+        return stale if stale is not None and stale.id == args.incident_id else None
+
+    claimed = store.claim_next(statuses)
+    if claimed is not None or not args.resume:
+        return claimed
+
+    stale = store.reclaim_stale_diagnosing(args.lease_age)
+    if stale is not None:
+        print(
+            f"reclaiming incident #{stale.id}: held in 'diagnosing' for over "
+            f"{args.lease_age}s, assuming the process that claimed it died"
+        )
+    return stale
 
 
 def _run_offline(store: Store, incident: Incident, toolbox: Toolbox, args) -> _Outcome:

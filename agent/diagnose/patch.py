@@ -27,6 +27,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -40,7 +41,13 @@ _GIT_TIMEOUT_SECONDS = 30
 # runs in under a second; a minute is a generous ceiling that still ends.
 _TEST_TIMEOUT_SECONDS = 120
 
-DEFAULT_TEST_COMMAND = ("python", "-m", "pytest", "-q")
+# sys.executable, not a bare "python": the gate must run the demo app's tests
+# with the same interpreter that is running the agent. Whoever launched the
+# agent chose an environment where the app is importable — resolving "python"
+# from PATH instead picks whatever comes first, which in the scripted demo is a
+# system interpreter with no fastapi, and turns "the tests failed" into a
+# verdict about the environment rather than about the diff.
+DEFAULT_TEST_COMMAND = (sys.executable, "-m", "pytest", "-q")
 DEFAULT_TEST_CWD = "demo-app"
 
 # Unified-diff target lines. Only the '+++ b/path' side is authoritative
